@@ -2,9 +2,10 @@
 
 Windows 桌面便签（Tauri 2 + Rust + React + TypeScript + Vite + Tailwind CSS）。
 
-无边框、透明背景、不在任务栏显示图标的普通窗口，默认不置顶（会被前台应用正常覆盖），
-通过系统托盘唤回，图钉按钮切换 alwaysOnTop，文本 / TODO / 窗口位置尺寸持久化到
-`%APPDATA%\com.ruststicky.notes\store.json`。
+**每张便签一个独立窗口**，支持 6 套配色、3 档字号、深浅主题与可调透明度；基于
+`owner = Progman` 的桌面绑定实现 Win+D 抵抗，同时保留"平时会被前台应用正常覆盖"的层级。
+`npm install` 后 `npm run tauri dev` 调试、`npm run tauri build -- --no-bundle` 出 exe，
+详见[运行](#运行)与[打包](#打包)。采用 MIT 许可证，详见 [LICENSE](LICENSE)。
 
 ## 技术栈
 
@@ -28,28 +29,30 @@ rust-sticky-notes/
 ├── tailwind.config.js
 ├── postcss.config.js
 ├── tsconfig.json
+├── LICENSE                     # MIT
 ├── scripts/gen_icon.py         # 用 Pillow 生成 1024px 源图标（一次性脚本）
 ├── src/                        # 前端
 │   ├── main.tsx
-│   ├── App.tsx                 # 状态编排 + 防抖保存
+│   ├── App.tsx                 # 单窗口状态编排 + 防抖保存（每个窗口只管自己那张便签）
 │   ├── api.ts                  # invoke 封装
+│   ├── theme.ts                # 6 套配色 × 浅/深、字号、透明度 → CSS 变量
 │   ├── types.ts                # 与 Rust store 结构对应
-│   ├── styles.css              # Tailwind + 滚动条等基础样式
+│   ├── styles.css              # Tailwind + 主题变量 / 滚动条 / 滑块
 │   └── components/
-│       ├── TopBar.tsx          # 拖动区 + 图钉 + 设置
+│       ├── TopBar.tsx          # 拖动区 + 图钉（旋转 45°）+ 设置
 │       ├── TodoList.tsx        # 待办增删改勾选
-│       ├── SettingsPanel.tsx   # 置顶/自启/隐藏/退出/数据路径
+│       ├── SettingsPanel.tsx   # 配色/字号/主题/透明度 + 置顶/自启/隐藏/删除/退出
 │       └── icons.tsx           # 内联 SVG，无图标库依赖
 └── src-tauri/
     ├── Cargo.toml
     ├── build.rs
-    ├── tauri.conf.json         # 窗口：无边框/透明/跳过任务栏/320x420
+    ├── tauri.conf.json         # 不在配置里预建窗口，全部由 Rust 按便签创建
     ├── capabilities/default.json
     ├── icons/                  # 由 `tauri icon` 生成
     └── src/
         ├── main.rs
-        ├── lib.rs              # 命令 + 托盘 + 窗口几何持久化
-        ├── store.rs            # JSON 读写（原子替换）
+        ├── lib.rs              # 命令 + 每便签窗口 + 托盘 + 几何持久化
+        ├── store.rs            # store.json v2 读写（v1 迁移 + 原子替换）
         └── win_desktop_pin.rs  # 抵抗 Win+D（owner = Progman 桌面绑定）
 ```
 
@@ -67,28 +70,111 @@ npm run tauri dev      # 开发模式（Vite HMR + Rust 热重启）
 ## 打包
 
 ```powershell
-npm run tauri build
+npm run tauri build -- --no-bundle
 ```
 
 产物：
 
 - 可执行文件：`src-tauri/target/release/rust-sticky-notes.exe`
-- 安装包：`src-tauri/target/release/bundle/nsis/Rust Sticky Notes_0.1.0_x64-setup.exe`
+- 安装包（去掉 `--no-bundle` 时）：`src-tauri/target/release/bundle/nsis/Rust Sticky Notes_0.2.0_x64-setup.exe`
+
+**必须走 Tauri CLI**：直接 `cargo build --release` 不会带上 `custom-protocol` 特性，
+打出来的 exe 会去连 `localhost:1420`，显示"无法访问此页面"。
 
 NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 
 ## 已实现
 
-- 窗口：`decorations: false` / `transparent: true` / `skipTaskbar: true` / `alwaysOnTop: false`，初始 320×420，可拖动（顶部 `data-tauri-drag-region`）、可拉伸
-- 便签文本：textarea，停止输入 450ms 后 `invoke("save_note")` 落盘
+- **多便签**：`notes[]` 里每条一个窗口，`label = note-<id>`；托盘「新建便签」按
+  `settings.defaultStyle` 初始化，新窗口相对已有窗口层叠偏移（每张 +32 逻辑像素），并夹回可见工作区
+- 窗口：`decorations: false` / `transparent: true` / `skipTaskbar: true` / 默认不置顶，
+  初始 320×420（物理像素按 DPI 换算），可拖动（顶部 `data-tauri-drag-region`）、可拉伸
+- 便签文本：textarea，停止输入 450ms 后 `invoke("save_note_content")` 落盘，只写当前窗口对应的那张
+- **标题可编辑**：点顶部标题原地变输入框（不是弹窗），回车 / 失焦保存，`Esc` 取消；
+  空标题回落到「便签」，输入上限 60 字符，过长单行省略并带 `title` 提示；
+  标题区之外仍是拖动区，输入框不参与拖拽
 - TODO：添加（回车）、勾选完成、行内改文字、删除、批量清除已完成，与文本一起持久化
-- 图钉：切换 `set_always_on_top`，按钮高亮表示当前状态，状态存 `settings.alwaysOnTop`，下次启动恢复
-- 托盘：左键唤回（`unminimize` → `show` → `set_focus`），右键菜单「显示便签 / 隐藏便签 / 退出」
-- 窗口位置与大小：监听 `Moved` / `Resized`，400ms 静默后写盘；启动时恢复，若上次所在显示器已不存在则回主屏居中
+- **外观（按便签独立）**：
+  - 配色：奶油 / 薄荷 / 樱粉 / 天蓝 / 沙金 / 石墨，每套都有浅色与深色两份色板
+  - 字号：小 / 中 / 大（基准 14 / 16 / 18 px），由 CSS 变量 `--note-font-size` 驱动，
+    正文、TODO、输入框按 em 等比缩放，不用 `transform: scale`
+  - 主题：浅色 / 深色；深色下卡片底色走 `#2A2622` 一类的深色系，文字、边框、分隔线、
+    滚动条、滑块全部跟随
+  - **透明度**：35%–100%（默认 97%，视觉与改造前一致），只作用于卡片底色和边框的 alpha，
+    文字 / 图标 / 勾选态 alpha 不变；低于 60% 时补一圈极轻的内描边帮助辨认边界
+  - 设置面板里的滑块拖动实时预览，停手 300ms 后落盘
+- **图钉**：置顶时图钉整体旋转 45° 并加深颜色（无外圈、无底色块），未置顶时竖直淡色、
+  hover 变深；每张便签的 `pinned` 状态独立保存
+- 设置面板（便签内小浮层，不另开窗口）：配色 / 字号 / 主题 / 透明度 / 置顶 / 开机自启 /
+  隐藏到托盘 / 删除此便签（二次确认）/ 退出应用 / 数据文件路径
+- 托盘：右键菜单「新建便签 / 显示全部便签 / 隐藏全部便签 / 退出」，左键唤回全部便签
+- 窗口位置与大小：按便签保存；监听 `Moved` / `Resized`，同一窗口 400ms 静默后写盘；
+  启动时恢复并夹回所在显示器工作区，显示器不存在则回主屏居中
 - 开机自启：设置面板开关直连 `tauri-plugin-autostart`，每次启动以系统真实状态为准回写 JSON
-- 关窗即隐藏（`CloseRequested` 里 `prevent_close` + `hide`），进程常驻托盘
-- **抵抗 Win+D**：`owner = Progman` 桌面绑定，显示桌面后便签浮在桌面上；不改置顶、不改"被前台应用覆盖"、
-  层级全程不切换所以也不"跳"（详见下文「抵抗 Win+D」一节）
+- 关窗即隐藏（`CloseRequested` 里 `prevent_close` + `hide` + `visible = false`），进程常驻托盘
+- **删除便签**：Rust 侧先从 `notes[]` 移除并落盘，再销毁窗口；删除最后一张后刷盘并退出应用
+- **并发写安全**：所有写操作都经过 Rust 侧单一的 `Mutex<Store>`，持锁完成"改内存 + 原子落盘"
+  （临时文件 + `rename`），前端不直接写文件，两个窗口不会互相覆盖
+- 退出：托盘退出、设置面板退出、`RunEvent::ExitRequested` 都会先 flush 再退出
+- **抵抗 Win+D**：每个便签窗口各自调用 `win_desktop_pin::install(&window, pinned)`（机制不变，
+  见下文「抵抗 Win+D」一节）；取消图钉时调用 `set_user_pinned(&window, false)` 垫回其它窗口之下
+
+## 数据文件与迁移
+
+路径：`%APPDATA%\com.ruststicky.notes\store.json`
+
+当前格式为 **version 2**：
+
+```json
+{
+  "version": 2,
+  "settings": {
+    "autostart": true,
+    "defaultStyle": { "color": "cream", "theme": "light", "fontSize": "md", "opacity": 0.97 }
+  },
+  "notes": [
+    {
+      "id": "9c1f7e02-...",
+      "title": "便签",
+      "text": "正文",
+      "todos": [{ "id": "8a2b...", "text": "买牛奶", "done": false }],
+      "color": "cream",
+      "theme": "light",
+      "fontSize": "md",
+      "opacity": 0.97,
+      "pinned": false,
+      "visible": true,
+      "bounds": { "x": 0, "y": 0, "width": 640, "height": 840 }
+    }
+  ]
+}
+```
+
+- `notes` 是数组，标题 / 内容 / 外观 / 置顶 / 可见性 / 几何全部按便签独立保存
+- `title` 上限 60 个字符，全空白会回落为「便签」，并同步到操作系统窗口标题（Alt+Tab 可见）
+- `fontSize` 取 `sm | md | lg`；`color` 取 `cream | mint | rose | sky | sand | graphite`；
+  `theme` 取 `light | dark`；`opacity` 会被 clamp 到 0.35–1
+- `bounds` 是**物理像素**；`visible: false` 的便签启动时不建窗口，托盘「显示全部」会重建
+
+**从 v1（单便签）迁移**：
+
+- 启动时检测 JSON 里有没有 `notes` 数组：没有就按旧格式 `{ text, todos, settings, window[, style] }` 解析
+- 迁移前先把原文件备份成同目录的 `store.v1.bak.json`（备份已存在则不覆盖，便于回溯）
+- 旧便签的 `text` / `todos` / `window` → 新 `notes[0]` 的内容与 `bounds`，标题固定为「便签」；
+  `settings.alwaysOnTop` → `notes[0].pinned`；`settings.autostart` → 新 `settings.autostart`；
+  若旧数据里已有 `style`（任务二版本）则继承，否则用默认奶油/浅色/中/97%
+- 迁移成功后立即按 v2 落盘，因此重复启动不会再走迁移分支（幂等），也不会重复备份
+
+## 托盘菜单
+
+| 菜单项 | 行为 |
+| --- | --- |
+| 新建便签 | 用 `defaultStyle` 建一张新便签（层叠偏移、夹回可见区域）并聚焦 |
+| 显示全部便签 | `unminimize` + `show` 全部窗口；被隐藏的便签会重新创建窗口，并把 `visible` 置回 true |
+| 隐藏全部便签 | 隐藏全部窗口，`visible` 置 false（重启后不自动出现） |
+| 退出 | 先 flush 全部便签状态，再退出进程 |
+
+左键单击托盘图标等同「显示全部便签」。
 
 ## 已验证（本机实测，2026-11-09）
 
@@ -104,6 +190,17 @@ Node 24.21.0、WebView2 157、3840×2160 @200% DPI。
   重启进程后窗口**原样恢复到 300,200 / 900×700 且仍为置顶**
 - `skipTaskbar` 由 tao 调 `ITaskbarList::DeleteTab` 实现（窗口样式仍是 `WS_EX_APPWINDOW`，
   这是正常的）；本机任务栏是自动隐藏，无法用截图佐证，只能从实现层面确认
+
+### 0.2.0 多便签 / 外观 / 标题（release exe + WebView2 CDP 实测）
+
+- v1 单便签 `store.json` 启动后迁移为 v2：文本、TODO、窗口几何（2105,718 / 640×840）、
+  `alwaysOnTop`、`autostart` 全部保留；`store.v1.bak.json` 与原文件逐字节一致，重复重启不再迁移
+- 两个便签窗口各自编辑正文互不影响（A 窗口写 A，B 窗口写 B），`notes[]` 中仅对应项变化
+- 只改 A 的配色 / 主题 / 字号 / 透明度：A 的 DOM 计算样式变为 18px、`rgba(51,35,42,0.6)`、
+  浅色文字，B 仍是 16px、`rgba(255,248,214,0.97)`、深色文字
+- 图钉置顶态：`aria-pressed=true`、transform 为 45° 旋转矩阵、颜色加深、无背景块
+- 重启后两张便签的内容 / 样式 / 置顶 / 位置全部还原，备份文件哈希不变
+- `SetWindowPos` 把其中一张挪到 300,200 / 900×700，400ms 防抖后只更新该便签的 `bounds`
 
 ## 启动速度怎么测
 
@@ -215,12 +312,21 @@ src-tauri\target\release\rust-sticky-notes.exe
 - 窗口几何按**物理像素**保存：在缩放比例不同的多显示器之间挪动后，重启位置可能有偏移
 - 开机自启注册的是**当前运行的可执行文件路径**：`tauri dev` 时开启自启会把 debug 版 exe 写进注册表，正式使用请先 `tauri build` 再开
 - 透明窗口没有系统投影，阴影是前端 CSS 画的（`shadow: false` 避免 Windows 给无边框窗口加矩形阴影）
-- 单便签、纯文本：不支持多便签、Markdown 渲染、图片、云同步
+- 多便签 = 多个 WebView2 实例，便签开很多时内存占用线性上升（每张约几十 MB 量级）
+- 深色主题 + 很低的透明度（<50%）且背后恰好是很亮的窗口时，卡片底色被稀释、浅色文字的对比度会下降；
+  文字本身没有变淡，卡片边界有内描边提示，但极端场景下的可读性无法仅靠 CSS alpha 保证
+- 没有 Markdown 渲染、图片、云同步
+- 「新建便签」使用 `settings.defaultStyle`（默认奶油/浅色/中/97%），暂未提供修改默认值的 UI；
+  已有个性化需求可以在单张便签里随时改
 
 ## 下一步
 
 1. 全局快捷键（`tauri-plugin-global-shortcut`，例如 `Ctrl+Alt+N` 唤回）
-2. 多便签：`store.json` 改成 `notes: [{id, ...}]` + 每个便签一个窗口
-3. 便签配色 / 字号选择，深浅主题
-4. 窗口贴边吸附、记住每块显示器上的位置（存 logical 坐标 + DPI）
-5. 自动保存提示细化（脏标记、退出前 flush）
+2. 窗口贴边吸附、记住每块显示器上的位置（存 logical 坐标 + DPI）
+3. 设置面板里提供"把当前外观设为新便签默认"
+4. 自动保存提示细化（脏标记、退出前 flush 的可见反馈）
+5. 监听 `TaskbarCreated` 后自动重绑 Progman，修复 explorer 重启导致的 Win+D 失效
+
+## 许可证
+
+本项目采用 MIT 许可证，详见 [LICENSE](LICENSE)。

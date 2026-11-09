@@ -1,22 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主便签窗口的默认能力集",
-  "windows": ["main"],
+  "description": "便签窗口的默认能力集（每张便签的 label 都是 note-<id>）",
+  "windows": ["note-*"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging",
-    "core:window:allow-set-always-on-top",
-    "core:window:allow-show",
-    "core:window:allow-hide",
-    "core:window:allow-minimize",
-    "core:window:allow-unminimize",
-    "core:window:allow-set-focus",
-    "core:window:allow-close",
-    "core:window:allow-set-size",
-    "core:window:allow-set-position",
-    "core:window:allow-inner-size",
-    "core:window:allow-outer-position",
-    "autostart:default"
+    "core:window:allow-start-dragging"
   ]
 }

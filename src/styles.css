@@ -72,6 +72,26 @@
   color: rgb(var(--note-muted) / 0.62);
 }
 
+/* 顶部可编辑标题 */
+.note-title-btn {
+  color: rgb(var(--note-icon) / 0.45);
+  max-width: 12em;
+  transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.note-title-btn:hover {
+  color: rgb(var(--note-icon) / 0.72);
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.07));
+}
+
+.note-title-input {
+  color: rgb(var(--note-text));
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.08));
+  outline: 1px solid rgb(var(--note-accent) / 0.55);
+  border-radius: 3px;
+  padding: 1px 2px;
+}
+
 /* 次要标签（顶部"便签"、TODO 标题等）用图标色 + 低 alpha */
 .note-label {
   color: rgb(var(--note-icon) / 0.45);
@@ -147,6 +167,15 @@
 
 .note-danger-hover:hover {
   color: rgb(var(--note-danger));
+  background-color: rgb(var(--note-danger) / 0.1);
+}
+
+.note-danger-outline {
+  color: rgb(var(--note-danger));
+  border-color: rgb(var(--note-danger) / 0.45);
+}
+
+.note-danger-outline:hover {
   background-color: rgb(var(--note-danger) / 0.1);
 }
 

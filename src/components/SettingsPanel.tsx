@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { useState } from "react";
 import {
   FONT_SIZES,
   MAX_OPACITY,
@@ -8,7 +9,7 @@ import {
   swatchStyle,
 } from "../theme";
 import type { NoteColor, NoteStyle, NoteTheme } from "../theme";
-import { PowerIcon, TrayIcon } from "./icons";
+import { PowerIcon, TrashIcon, TrayIcon } from "./icons";
 
 type Props = {
   pinned: boolean;
@@ -19,6 +20,7 @@ type Props = {
   onTogglePin: () => void;
   onToggleAutostart: () => void;
   onHide: () => void;
+  onDelete: () => void;
   onQuit: () => void;
   onClose: () => void;
 };
@@ -127,10 +129,12 @@ export default function SettingsPanel({
   onTogglePin,
   onToggleAutostart,
   onHide,
+  onDelete,
   onQuit,
   onClose,
 }: Props) {
   const palette = PALETTES[style.color][style.theme];
+  const [confirmDelete, setConfirmDelete] = useState(false);
   // 便签本身可以很透，但设置面板必须保持可读，最低按 90% 不透明度显示
   const panelStyle = {
     "--note-panel-alpha": Math.max(style.opacity, 0.9).toFixed(2),
@@ -243,6 +247,41 @@ export default function SettingsPanel({
           <TrayIcon className="note-faint h-[0.875em] w-[0.875em]" />
           隐藏到托盘
         </button>
+
+        {/* ---- 删除此便签（二次确认，关窗不等于删数据） ---- */}
+        {confirmDelete ? (
+          <div className="note-subtle-bg mt-1 rounded-lg px-2 py-1.5">
+            <div className="note-text text-[0.6875em] leading-snug">
+              删除后无法恢复，确认删除这张便签？
+            </div>
+            <div className="mt-1.5 flex justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                className="note-muted note-hover-soft rounded-md px-2 py-[3px] text-[0.6875em] transition-colors"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={onDelete}
+                className="note-danger-outline rounded-md border px-2 py-[3px] text-[0.6875em] transition-colors"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            className="note-danger note-hover-soft note-focus flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[0.75em] focus-visible:outline-none"
+          >
+            <TrashIcon className="h-[0.875em] w-[0.875em]" />
+            删除此便签
+          </button>
+        )}
+
         <button
           type="button"
           onClick={onQuit}

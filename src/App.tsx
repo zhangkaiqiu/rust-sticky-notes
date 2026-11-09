@@ -16,6 +16,7 @@ function newId(): string {
 
 export default function App() {
   const [ready, setReady] = useState(false);
+  const [title, setTitle] = useState("便签");
   const [text, setText] = useState("");
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [pinned, setPinned] = useState(false);
@@ -26,19 +27,20 @@ export default function App() {
   const [savedTick, setSavedTick] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  // 1) 启动时从 Rust 侧载入整份状态
+  // 1) 启动时只载入「当前窗口」对应的那张便签（label = note-<id>）
   useEffect(() => {
     let alive = true;
     void (async () => {
       try {
-        const state = await api.loadState();
+        const snapshot = await api.noteState();
         if (!alive) return;
-        setText(state.text);
-        setTodos(state.todos);
-        setPinned(state.settings.alwaysOnTop);
-        setAutostart(state.settings.autostart);
-        setStyle(normalizeStyle(state.style));
-        setStorePath(await api.getStorePath());
+        setTitle(snapshot.note.title || "便签");
+        setText(snapshot.note.text);
+        setTodos(snapshot.note.todos);
+        setPinned(snapshot.note.pinned);
+        setAutostart(snapshot.autostart);
+        setStyle(normalizeStyle(snapshot.note));
+        setStorePath(snapshot.storePath);
       } catch (err) {
         if (alive) setError(`读取本地数据失败：${String(err)}`);
       } finally {
@@ -60,7 +62,7 @@ export default function App() {
     }
     const timer = window.setTimeout(() => {
       api
-        .saveNote(text, todos)
+        .saveContent(text, todos)
         .then(() => {
           setSavedTick((n) => n + 1);
           setError(null);
@@ -100,7 +102,13 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [settingsOpen]);
 
-  // 5) 错误提示自动消失
+  // 5) 同步 HTML 文档标题：WebView2 会把 document.title 反映到窗口标题，
+  // 这样 Alt+Tab / 任务管理器里显示的就是便签自己的名字。
+  useEffect(() => {
+    document.title = title;
+  }, [title]);
+
+  // 6) 错误提示自动消失
   useEffect(() => {
     if (!error) return;
     const t = window.setTimeout(() => setError(null), 5000);
@@ -137,6 +145,15 @@ export default function App() {
     setStyle((prev) => normalizeStyle({ ...prev, ...patch }));
   }, []);
 
+  /** 标题是离散操作（回车 / 失焦才提交），直接走同一条 Rust 单锁写盘通道 */
+  const renameTitle = useCallback((next: string) => {
+    setTitle(next);
+    api
+      .saveTitle(next)
+      .then((actual) => setTitle(actual))
+      .catch((err) => setError(`保存标题失败：${String(err)}`));
+  }, []);
+
   const togglePin = useCallback(async () => {
     const next = !pinned;
     setPinned(next);
@@ -159,7 +176,13 @@ export default function App() {
 
   const hideToTray = useCallback(() => {
     setSettingsOpen(false);
-    void api.hideWindow();
+    void api.hideNote();
+  }, []);
+
+  /** 删除当前便签：后端先落盘再销毁窗口；删到一张不剩时应用会自行退出 */
+  const deleteThisNote = useCallback(() => {
+    setSettingsOpen(false);
+    void api.deleteNote().catch((err) => setError(`删除便签失败：${String(err)}`));
   }, []);
 
   const quit = useCallback(() => {
@@ -178,9 +201,11 @@ export default function App() {
         }`}
       >
         <TopBar
+          title={title}
           pinned={pinned}
           savedTick={savedTick}
           settingsOpen={settingsOpen}
+          onTitleChange={renameTitle}
           onTogglePin={togglePin}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
         />
@@ -221,6 +246,7 @@ export default function App() {
           onTogglePin={togglePin}
           onToggleAutostart={toggleAutostart}
           onHide={hideToTray}
+          onDelete={deleteThisNote}
           onQuit={quit}
           onClose={() => setSettingsOpen(false)}
         />

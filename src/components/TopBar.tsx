@@ -1,23 +1,34 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { GearIcon, PinIcon } from "./icons";
 
 type Props = {
+  title: string;
   pinned: boolean;
   savedTick: number;
   settingsOpen: boolean;
+  onTitleChange: (next: string) => void;
   onTogglePin: () => void;
   onToggleSettings: () => void;
 };
 
-/** 顶部条既是拖动区，也放图钉 / 设置按钮 */
+/** 与 Rust 侧 `store::MAX_TITLE_CHARS` 保持一致 */
+const MAX_TITLE_CHARS = 60;
+const DEFAULT_TITLE = "便签";
+
+/** 顶部条既是拖动区，也放标题 / 图钉 / 设置按钮 */
 export default function TopBar({
+  title,
   pinned,
   savedTick,
   settingsOpen,
+  onTitleChange,
   onTogglePin,
   onToggleSettings,
 }: Props) {
   const [justSaved, setJustSaved] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (savedTick === 0) return;
@@ -26,17 +37,77 @@ export default function TopBar({
     return () => window.clearTimeout(t);
   }, [savedTick]);
 
+  // 进入编辑态后聚焦并全选，方便直接覆盖旧标题
+  useEffect(() => {
+    if (!editing) return;
+    const el = inputRef.current;
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  }, [editing]);
+
+  const beginEdit = () => {
+    setDraft(title);
+    setEditing(true);
+  };
+
+  const commit = () => {
+    if (!editing) return;
+    const next = draft.trim().slice(0, MAX_TITLE_CHARS) || DEFAULT_TITLE;
+    setEditing(false);
+    setDraft(next);
+    if (next !== title) onTitleChange(next);
+  };
+
+  const cancel = () => {
+    setEditing(false);
+    setDraft(title);
+  };
+
   return (
     <div
       data-tauri-drag-region
       className="flex h-9 shrink-0 select-none items-center gap-1 pl-3.5 pr-1.5"
     >
-      <span
-        data-tauri-drag-region
-        className="note-label pointer-events-none text-[0.625em] font-semibold uppercase tracking-[0.16em]"
-      >
-        便签
-      </span>
+      {editing ? (
+        /*
+          输入框不挂 data-tauri-drag-region，且 mousedown 阻止冒泡：
+          点标题能正常聚焦 / 选词，点它旁边的空白仍然拖窗口。
+        */
+        <input
+          ref={inputRef}
+          value={draft}
+          maxLength={MAX_TITLE_CHARS}
+          aria-label="便签标题"
+          spellCheck={false}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onMouseDown={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+          style={{ width: `${Math.min(14, Math.max(3, draft.length + 1))}ch` }}
+          className="note-title-input text-[0.625em] font-semibold tracking-[0.14em] outline-none"
+        />
+      ) : (
+        <button
+          type="button"
+          title={title}
+          onClick={beginEdit}
+          onMouseDown={(e) => e.stopPropagation()}
+          className="note-title-btn note-focus truncate rounded-[3px] px-0.5 text-[0.625em] font-semibold uppercase tracking-[0.14em] focus-visible:outline-none"
+        >
+          {title}
+        </button>
+      )}
 
       {/* 剩余空白都可拖动：pointer-events-none 让事件落到父级拖动区 */}
       <div data-tauri-drag-region className="pointer-events-none h-full flex-1" />
