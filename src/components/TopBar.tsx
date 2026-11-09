@@ -49,18 +49,27 @@ export default function TopBar({
         已保存
       </span>
 
+      {/*
+        图钉只有两种视觉状态，不再画外圈 / 底色块：
+        - 未置顶：竖直、淡色，hover 变深；
+        - 置顶：整体旋转 45°（斜着的图钉），直接保持深色。
+        旋转加在 svg 自身上（transform-origin 居中），按钮 padding 留白足够、
+        且没有 overflow-hidden，所以旋转后不会被裁切，点击热区也不变。
+      */}
       <button
         type="button"
-        title={pinned ? "取消置顶（会随前台应用被覆盖）" : "置顶（始终显示在最前）"}
+        title={pinned ? "取消置顶" : "置顶"}
         aria-pressed={pinned}
         onClick={onTogglePin}
-        className={`rounded-full p-1.5 transition-colors ${
-          pinned
-            ? "bg-amber-500/85 text-white shadow-sm"
-            : "text-amber-900/55 hover:bg-amber-900/10 hover:text-amber-900/80"
-        }`}
+        className="group flex items-center justify-center rounded-full p-[7px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-900/25"
       >
-        <PinIcon className="h-[15px] w-[15px]" />
+        <PinIcon
+          className={`h-[15px] w-[15px] overflow-visible transition-[transform,color] duration-200 ease-out ${
+            pinned
+              ? "rotate-45 text-amber-900/80"
+              : "text-amber-900/55 group-hover:text-amber-900/80"
+          }`}
+        />
       </button>
 
       <button
