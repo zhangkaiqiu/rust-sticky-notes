@@ -15,7 +15,10 @@ export const api = {
     invoke<void>("save_note_content", { text, todos }),
   saveTitle: (title: string) => invoke<string>("set_note_title", { title }),
   saveStyle: (style: NoteStyle) => invoke<NoteStyle>("set_note_style", { style }),
-  setPinned: (pinned: boolean) => invoke<void>("set_note_pinned", { pinned }),
+  setPinned: (pinned: boolean) =>
+    invoke<boolean>("set_note_pinned", { pinned }),
+  /** 回读窗口**实际**的置顶状态（后端读 WS_EX_TOPMOST），用于校准图钉图标 */
+  alwaysOnTop: () => invoke<boolean>("get_note_always_on_top"),
   /** 折叠 / 展开当前便签：只改窗口实际尺寸，bounds 里始终是展开态几何 */
   setCollapsed: (collapsed: boolean) =>
     invoke<boolean>("set_note_collapsed", { collapsed }),

@@ -419,8 +419,72 @@ src-tauri\target\release\rust-sticky-notes.exe
 3. 再按一次 Win+D（或点任务栏） → 应用回来，便签重新被覆盖；
 4. 点图钉置顶 → 应用盖不住它；再点一次取消置顶 → 便签回到应用后面（不是停在最前面）。
 
-想临时关掉这个能力：注掉 `lib.rs` 里 `win_desktop_pin::install(&window);` 这一行即可，
+想临时关掉这个能力：注掉 `lib.rs` 里 `win_desktop_pin::install(&window, note.pinned);` 这一行即可，
 其余功能不受影响。
+
+## 层级与置顶（0.3.1 修正）
+
+这一节写给未来的自己：0.3.0 有两个层级 bug，根因都在**同一条 Win32 规则**上，改之前请先读完。
+
+### 核心前提：owner = Progman 的窗口是一个 z-order 组
+
+所有便签的 owner 都是 `Progman`，于是它们在 Windows 眼里属于**同一个 z-order 组**。
+组内任何一次会改动层级的操作，都会牵连其它成员——这就是两个 bug 的共同来源。
+
+### 修掉的两个问题
+
+**BUG 1：点图钉把"后面那张便签"也拉到前台应用之上**
+
+- 根因：不是 `set_always_on_top` 的锅，而是**窗口被激活**。激活一个 owner = Progman 的窗口时，
+  Windows 会把同 owner 组的兄弟窗口一起抬到普通层最前面。
+  实测（`EnumWindows` 的 z 索引，0 = 最前）：激活 A 之前 `A.z=27 B.z=28`，
+  激活之后 `A.z=27 B.z=7`——B 越过了前台浏览器（`Chrome z=6~10`）。
+- 修法：`SetWindowPos` 一律带 `SWP_NOOWNERZORDER | SWP_NOACTIVATE`；
+  并在 `WindowEvent::Focused(true)`（以及新建窗口、图钉切换之后）调用
+  `park_siblings_behind()`，把**其它未置顶**的便签重新垫回 `HWND_BOTTOM`。
+  只垫未置顶的窗口，因此不会把已经置顶的便签踩下去。
+
+**BUG 2：重启后图钉显示"钉住"，实际没置顶**
+
+- 根因：`SetWindowPos(未置顶窗口, HWND_BOTTOM)` 少了 `SWP_NOOWNERZORDER`，
+  会**顺带清掉兄弟窗口的 `WS_EX_TOPMOST`**。启动时 pinned 的便签先建好（`0x40118`），
+  紧接着 unpinned 的那张 `park_behind`，一秒后 pinned 那张就变成 `0x40110`——
+  内存里 `pinned=true`，窗口却不置顶了。所以这个 bug 与创建顺序有关，
+  一旦数据里存在 pinned 的便签，冷启动就会踩中。
+- 修法：`park_behind()` 加 `SWP_NOOWNERZORDER`；`install()` 里先校验置顶、再垫底、最后压兄弟窗口。
+
+### pin 切换时的保证
+
+1. 置顶（`pinned = true`）：目标窗口进入置顶层（`WS_EX_TOPMOST`），前台应用盖不住它；
+2. 取消置顶（`pinned = false`）：先 `HWND_NOTOPMOST` 撤出置顶，再补一次 `HWND_BOTTOM`
+   （tao 的 `HWND_NOTOPMOST` 会把窗口留在普通层最前面，不补这一下就会飘在应用之上）；
+3. 两种情况下，**其它未置顶便签都会被重新垫回底部**，不会跟着一起窜上前台；
+4. 全程不轮询、不做 `HWND_TOPMOST` 的循环切换；`SWP_NOACTIVATE` 保证不抢焦点。
+
+### 重启后的状态校验
+
+`install()` 在应用完 `pinned` 之后会回读 `WS_EX_TOPMOST`：
+
+- 期望置顶但 exstyle 没有该位 → 重试一次 `set_always_on_top(true)`，
+  仍不一致再兜底一次 `HWND_TOPMOST`；
+- 期望取消置顶但仍有该位 → 重试一次 `set_always_on_top(false)`。
+
+前端不再盲信 `store.json` 里的 `pinned`：启动时调用 `get_note_always_on_top` 命令
+从窗口真实 exstyle 回读一次，切换图钉后也用后端返回的**实际**状态刷新图标。
+后端落盘的同样是实际生效的状态，这样"图标说钉住、实际没钉住"不会再出现。
+只在启动与切换两个路口各读一次，**不做高频轮询**。
+
+### 排查开关
+
+设置环境变量 `STICKY_DEBUG_ZORDER=1` 后，每次层级操作都会打印每个便签窗口的
+`exstyle` / `WS_EX_TOPMOST` / owner / z 索引。默认关闭，不影响正常使用。
+
+### 已知限制
+
+- `SWP_NOOWNERZORDER` 只能阻止"改 z 序"这一步顺手改兄弟窗口，**管不住激活**，
+  所以激活后的补垫（`park_siblings_behind`）是必须的，不能省；
+- 由于便签同属一个 owner 组，极端情况下（其它软件也在操作 owner = Progman 的窗口）
+  仍可能有短暂的层级抖动，补垫逻辑会在下一个层级操作时收敛回来。
 
 ## 已知限制
 
