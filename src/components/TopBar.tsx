@@ -1,3 +1,4 @@
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { ChevronIcon, GearIcon, PinIcon } from "./icons";
 
@@ -11,6 +12,8 @@ type Props = {
   onTogglePin: () => void;
   onToggleCollapsed: () => void;
   onToggleSettings: () => void;
+  /** 标题输入框右键 → 打开自定义菜单（剪切 / 复制 / 粘贴 / 全选） */
+  onFieldContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
 };
 
 /** 与 Rust 侧 `store::MAX_TITLE_CHARS` 保持一致 */
@@ -28,6 +31,7 @@ export default function TopBar({
   onTogglePin,
   onToggleCollapsed,
   onToggleSettings,
+  onFieldContextMenu,
 }: Props) {
   const [justSaved, setJustSaved] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -107,6 +111,7 @@ export default function TopBar({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={commit}
           onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={onFieldContextMenu}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === "Enter") {

@@ -18,6 +18,8 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2"
 # 单实例锁：第二次双击 exe 时不再起第二套窗口，而是唤回已有便签
 tauri-plugin-single-instance = "2"
+# 右键菜单的剪切/复制/粘贴走系统剪贴板
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
