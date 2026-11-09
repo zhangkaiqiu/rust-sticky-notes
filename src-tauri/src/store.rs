@@ -9,7 +9,7 @@
 //!     {
 //!       "id": "uuid", "text": "正文", "todos": [],
 //!       "color": "cream", "theme": "light", "fontSize": "md", "opacity": 0.97,
-//!       "pinned": false, "visible": true,
+//!       "pinned": false, "collapsed": false, "visible": true,
 //!       "bounds": { "x": 0, "y": 0, "width": 640, "height": 840 }
 //!     }
 //!   ]
@@ -135,6 +135,9 @@ pub struct Note {
     pub font_size: String,
     pub opacity: f64,
     pub pinned: bool,
+    /// 折叠成条：窗口只留标题栏高度（约 48 逻辑像素）。
+    /// 注意 `bounds` 始终保存**展开态**几何，折叠只改窗口实际尺寸，不把 48px 写进 bounds。
+    pub collapsed: bool,
     /// 启动时只恢复 visible = true 的便签；关闭 / 隐藏会置为 false
     pub visible: bool,
     pub bounds: Option<WindowGeometry>,
@@ -152,6 +155,7 @@ impl Default for Note {
             font_size: "md".to_string(),
             opacity: 0.97,
             pinned: false,
+            collapsed: false,
             visible: true,
             bounds: None,
         }
@@ -318,6 +322,7 @@ fn migrate(legacy: LegacyStore) -> Store {
         font_size: style.font_size.clone(),
         opacity: style.opacity,
         pinned: legacy.settings.always_on_top,
+        collapsed: false,
         visible: true,
         bounds: legacy.window,
     };

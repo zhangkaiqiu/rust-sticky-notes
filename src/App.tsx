@@ -20,6 +20,7 @@ export default function App() {
   const [text, setText] = useState("");
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [pinned, setPinned] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const [autostart, setAutostart] = useState(false);
   const [style, setStyle] = useState<NoteStyle>(() => normalizeStyle(null));
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -38,6 +39,7 @@ export default function App() {
         setText(snapshot.note.text);
         setTodos(snapshot.note.todos);
         setPinned(snapshot.note.pinned);
+        setCollapsed(snapshot.note.collapsed === true);
         setAutostart(snapshot.autostart);
         setStyle(normalizeStyle(snapshot.note));
         setStorePath(snapshot.storePath);
@@ -165,8 +167,21 @@ export default function App() {
     }
   }, [pinned]);
 
-  const toggleAutostart = useCallback(async () => {
+  /** 折叠成条 / 展开：窗口高度由 Rust 侧调整，前端只切内容与图标方向 */
+  const toggleCollapsed = useCallback(async () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    // 折叠后设置面板没有立足之地，顺手关掉
+    setSettingsOpen(false);
     try {
+      await api.setCollapsed(next);
+    } catch (err) {
+      setCollapsed(!next);
+      setError(`切换折叠失败：${String(err)}`);
+    }
+  }, [collapsed]);
+
+  const toggleAutostart = useCallback(async () => {    try {
       const actual = await api.setAutostart(!autostart);
       setAutostart(actual);
     } catch (err) {
@@ -203,36 +218,43 @@ export default function App() {
         <TopBar
           title={title}
           pinned={pinned}
+          collapsed={collapsed}
           savedTick={savedTick}
           settingsOpen={settingsOpen}
           onTitleChange={renameTitle}
           onTogglePin={togglePin}
+          onToggleCollapsed={toggleCollapsed}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
         />
 
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          spellCheck={false}
-          placeholder="写点什么…"
-          className="note-placeholder note-text note-scroll min-h-[72px] flex-1 resize-none bg-transparent px-4 pb-1 pt-0.5 text-[0.84375em] leading-relaxed outline-none"
-        />
+        {/* 折叠成条时只留标题栏：正文 / 待办都不渲染（窗口高度只有 48 逻辑像素） */}
+        {!collapsed && (
+          <>
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              spellCheck={false}
+              placeholder="写点什么…"
+              className="note-placeholder note-text note-scroll min-h-[72px] flex-1 resize-none bg-transparent px-4 pb-1 pt-0.5 text-[0.84375em] leading-relaxed outline-none"
+            />
 
-        <div className="note-divider mx-3 h-px shrink-0" />
+            <div className="note-divider mx-3 h-px shrink-0" />
 
-        <TodoList
-          todos={todos}
-          onAdd={addTodo}
-          onToggle={toggleTodo}
-          onEdit={editTodo}
-          onRemove={removeTodo}
-          onClearDone={clearDone}
-        />
+            <TodoList
+              todos={todos}
+              onAdd={addTodo}
+              onToggle={toggleTodo}
+              onEdit={editTodo}
+              onRemove={removeTodo}
+              onClearDone={clearDone}
+            />
 
-        {error && (
-          <div className="note-danger px-4 pb-2 text-[0.6875em] leading-snug">
-            {error}
-          </div>
+            {error && (
+              <div className="note-danger px-4 pb-2 text-[0.6875em] leading-snug">
+                {error}
+              </div>
+            )}
+          </>
         )}
       </div>
 

@@ -18,8 +18,8 @@ use std::time::Duration;
 use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent, State, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
+    AppHandle, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent, State,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 
@@ -27,6 +27,16 @@ use store::{normalize_title, Note, NoteStyle, Store, TodoItem, WindowGeometry};
 
 /// 便签窗口 label 前缀；完整 label 为 `note-<uuid>`
 const NOTE_LABEL_PREFIX: &str = "note-";
+
+/// 折叠态窗口高度（逻辑像素）：只够放一行标题栏
+const COLLAPSED_HEIGHT: f64 = 48.0;
+/// 折叠态允许的最小高度（逻辑像素）：比 48 略低，留一点系统边框误差
+const MIN_COLLAPSED_HEIGHT: f64 = 40.0;
+/// 展开态的尺寸下限（逻辑像素）；折叠时必须先把这个下限降下来，否则窗口会被顶回 260
+const MIN_EXPANDED_WIDTH: f64 = 240.0;
+const MIN_EXPANDED_HEIGHT: f64 = 260.0;
+/// 没有历史展开高度时的兜底高度（逻辑像素）
+const DEFAULT_EXPANDED_HEIGHT: f64 = 420.0;
 
 pub struct AppState {
     store: Mutex<Store>,
@@ -228,9 +238,69 @@ fn set_note_pinned(
     })
 }
 
+/// 折叠 / 展开当前便签。
+///
+/// 关键约束：`bounds` 永远保存**展开态**几何。
+/// - 折叠：先把窗口此刻的展开几何抓进 bounds，再把窗口压到 48 逻辑像素高；
+/// - 展开：按 bounds 里存的展开高度恢复（宽度沿用当前宽度）。
 #[tauri::command]
-async fn create_note(app: AppHandle) -> Result<String, String> {
-    // 必须是 async：同步命令跑在主线程，而建窗口要等事件循环把 WebView2 创建完，
+fn set_note_collapsed(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, AppState>,
+    collapsed: bool,
+) -> Result<bool, String> {
+    let id = require_note_id(&window)?;
+    let label = window.label().to_string();
+    let webview = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "便签窗口不存在".to_string())?;
+
+    let (current, stored_bounds) = state.read(|s| {
+        s.notes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| (n.collapsed, n.bounds.clone()))
+            .unwrap_or((false, None))
+    })?;
+    if current == collapsed {
+        return Ok(collapsed);
+    }
+
+    let mut bounds = stored_bounds.unwrap_or_default();
+    if collapsed {
+        // 以窗口此刻的真实几何作为「展开态」保存
+        if let (Ok(position), Ok(size)) = (webview.outer_position(), webview.outer_size()) {
+            if size.width >= 200 && size.height >= 100 {
+                bounds = WindowGeometry {
+                    x: position.x,
+                    y: position.y,
+                    width: size.width,
+                    height: size.height,
+                };
+            }
+        }
+    }
+
+    let persisted = bounds.clone();
+    state.update(move |s| {
+        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+            note.collapsed = collapsed;
+            if persisted.width > 0 && persisted.height > 0 {
+                note.bounds = Some(persisted);
+            }
+        }
+    })?;
+
+    apply_collapse_size(&webview, collapsed, Some(bounds.height))
+        .map_err(|e| format!("调整窗口尺寸失败：{e}"))?;
+
+    schedule_tray_refresh(&app);
+    Ok(collapsed)
+}
+
+#[tauri::command]
+async fn create_note(app: AppHandle) -> Result<String, String> {    // 必须是 async：同步命令跑在主线程，而建窗口要等事件循环把 WebView2 创建完，
     // 主线程一阻塞就会死锁（表现为窗口建出来但是 about:blank）。
     let note = new_note_internal(&app)?;
     create_note_window(&app, &note, true).map_err(|e| format!("创建便签窗口失败：{e}"))?;
@@ -374,7 +444,9 @@ fn create_note_window(
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title(note.title.clone())
         .inner_size(320.0, 420.0)
-        .min_inner_size(240.0, 260.0)
+        // 最小高度先按折叠态给（40），展开态的 260 在 restore_bounds 之后按状态再设，
+        // 否则 260 的下限会把折叠窗口顶回去。
+        .min_inner_size(MIN_EXPANDED_WIDTH, MIN_COLLAPSED_HEIGHT)
         .decorations(false)
         .transparent(true)
         .skip_taskbar(true)
@@ -386,6 +458,17 @@ fn create_note_window(
         .build()?;
 
     restore_bounds(&window, note.bounds.as_ref());
+    // 折叠态启动：永远存展开几何，只把窗口实际高度压到 48
+    if note.collapsed {
+        if let Err(err) = apply_collapse_size(&window, true, note.bounds.as_ref().map(|b| b.height)) {
+            eprintln!("[window] 应用折叠尺寸失败：{err}");
+        }
+    } else {
+        let _ = window.set_min_size(Some(LogicalSize::new(
+            MIN_EXPANDED_WIDTH,
+            MIN_EXPANDED_HEIGHT,
+        )));
+    }
     let _ = window.show();
     // 窗口是 visible:false 创建后再 show 的，Windows 上有一定概率把任务栏按钮带回来，
     // 这里显式再删一次（底层是 ITaskbarList::DeleteTab）
@@ -429,6 +512,39 @@ fn restore_bounds(window: &WebviewWindow, bounds: Option<&WindowGeometry>) {
 
     let (x, y) = clamp_to_area(area, geo.x, geo.y, geo.width, geo.height);
     let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+/// 按折叠状态设置窗口尺寸与最小尺寸限制。
+///
+/// 折叠时必须**先**把最小高度降到 40，再缩窗口——否则 260 的下限会把它顶回去；
+/// 展开时反过来：先恢复尺寸再抬下限。折叠只改窗口，不动 `bounds`。
+fn apply_collapse_size(
+    window: &WebviewWindow,
+    collapsed: bool,
+    expanded_height: Option<u32>,
+) -> tauri::Result<()> {
+    let scale = window.scale_factor()?;
+    let current = window.inner_size()?;
+    let width_logical = (current.width as f64 / scale).max(MIN_EXPANDED_WIDTH);
+
+    if collapsed {
+        window.set_min_size(Some(LogicalSize::new(
+            MIN_EXPANDED_WIDTH,
+            MIN_COLLAPSED_HEIGHT,
+        )))?;
+        window.set_size(LogicalSize::new(width_logical, COLLAPSED_HEIGHT))?;
+    } else {
+        let height_logical = expanded_height
+            .map(|h| h as f64 / scale)
+            .unwrap_or(DEFAULT_EXPANDED_HEIGHT)
+            .max(MIN_EXPANDED_HEIGHT);
+        window.set_size(LogicalSize::new(width_logical, height_logical))?;
+        window.set_min_size(Some(LogicalSize::new(
+            MIN_EXPANDED_WIDTH,
+            MIN_EXPANDED_HEIGHT,
+        )))?;
+    }
+    Ok(())
 }
 
 fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
@@ -502,6 +618,10 @@ fn schedule_geometry_persist(app: &AppHandle, label: &str) {
 }
 
 /// 从窗口读当前几何（物理像素）写进该便签的 bounds
+/// 从窗口读当前几何（物理像素）写进该便签的 bounds。
+///
+/// 折叠态特殊处理：窗口高度是 48 逻辑像素，但 `bounds` 必须保留展开态高度，
+/// 所以折叠时只更新位置和宽度，高度沿用已保存的展开高度。
 fn capture_geometry(app: &AppHandle, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
         return;
@@ -512,21 +632,42 @@ fn capture_geometry(app: &AppHandle, label: &str) {
     let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
     };
-    // 最小化 / 隐藏时可能拿到 0，丢弃这次结果
-    if size.width < 100 || size.height < 100 {
-        return;
-    }
     let Some(id) = note_id_from_label(label) else {
         return;
     };
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
+    let (collapsed, saved_height) = state
+        .read(|s| {
+            s.notes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| {
+                    (
+                        n.collapsed,
+                        n.bounds.as_ref().map(|b| b.height).unwrap_or(0),
+                    )
+                })
+                .unwrap_or((false, 0))
+        })
+        .unwrap_or((false, 0));
+
+    // 最小化 / 隐藏时可能拿到 0，丢弃这次结果；折叠态高度本来就只有 ~48，跳过高度下限检查
+    if size.width < 100 || (!collapsed && size.height < 100) {
+        return;
+    }
+
+    let height = if collapsed {
+        saved_height.max(200)
+    } else {
+        size.height
+    };
     let geometry = WindowGeometry {
         x: position.x,
         y: position.y,
         width: size.width,
-        height: size.height,
+        height,
     };
     let _ = state.update(move |s| {
         if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
@@ -965,6 +1106,7 @@ pub fn run() {
             set_note_title,
             set_note_style,
             set_note_pinned,
+            set_note_collapsed,
             create_note,
             delete_note,
             set_autostart,

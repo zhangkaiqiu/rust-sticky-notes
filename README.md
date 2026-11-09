@@ -116,6 +116,10 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 - **单实例锁**：`tauri-plugin-single-instance`（在 `Builder` 上第一个注册）。第二次双击 exe 不再起第二套窗口，
   而是把已有便签 `show()` + `set_focus()`（第一张获得焦点）；判定按应用 identifier，
   因此**便携模式的两份拷贝同机运行时，第二份会被判定为"已有实例"**
+- **折叠成条**：标题栏最左侧的箭头一键折叠，窗口高度缩到 **48 逻辑像素**，只留标题栏
+  （标题 / 展开箭头 / 图钉 / 设置）；再点一次按保存的展开高度恢复。`bounds` 始终保存**展开态**
+  几何，折叠不会把 48px 写进 `bounds`；最小尺寸按状态动态设置（折叠 40 / 展开 260 逻辑像素），
+  不再用一个写死的 260 下限挡住折叠
 - **删除便签**：Rust 侧先从 `notes[]` 移除并落盘，再销毁窗口；删除最后一张后刷盘并退出应用
 - **并发写安全**：所有写操作都经过 Rust 侧单一的 `Mutex<Store>`，持锁完成"改内存 + 原子落盘"
   （临时文件 + `rename`），前端不直接写文件，两个窗口不会互相覆盖
@@ -147,6 +151,7 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
       "fontSize": "md",
       "opacity": 0.97,
       "pinned": false,
+      "collapsed": false,
       "visible": true,
       "bounds": { "x": 0, "y": 0, "width": 640, "height": 840 }
     }
@@ -159,6 +164,8 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 - `fontSize` 取 `sm | md | lg`；`color` 取 `cream | mint | rose | sky | sand | graphite`；
   `theme` 取 `light | dark`；`opacity` 会被 clamp 到 0.35–1
 - `bounds` 是**物理像素**；`visible: false` 的便签启动时不建窗口，托盘「显示全部」会重建
+- `collapsed: true` 只说明"窗口现在收成条"：`bounds` 里存的仍是**展开态**宽高，启动时按 `collapsed`
+  把窗口压到 48 逻辑像素，展开时再按 `bounds.height` 恢复
 
 **从 v1（单便签）迁移**：
 
