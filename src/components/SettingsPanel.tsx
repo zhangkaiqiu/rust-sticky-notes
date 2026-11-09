@@ -214,7 +214,8 @@ export default function SettingsPanel({
             type="range"
             min={Math.round(MIN_OPACITY * 100)}
             max={Math.round(MAX_OPACITY * 100)}
-            step={5}
+            // 1% 一跳（方向键同样按 step 走），百分比数字随 value 同步
+            step={1}
             value={Math.round(style.opacity * 100)}
             aria-label="便签透明度"
             onChange={(e) => onStyleChange({ opacity: Number(e.target.value) / 100 })}
