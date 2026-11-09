@@ -526,6 +526,44 @@ fn capture_geometry(app: &AppHandle, label: &str) {
 
 // ---------------------------------------------------------------- 托盘
 
+/// 单实例锁回调：第二次双击 exe 时唤回已有便签。
+/// 只处理「已经存在」的窗口——这里不能建窗口（回调不在主线程，WebView2 必须主线程创建），
+/// 被隐藏到托盘的便签用托盘「显示全部便签」来恢复即可。
+fn focus_existing_notes(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let notes = state.read(|s| s.notes.clone()).unwrap_or_default();
+    let mut first = None;
+    let mut shown = Vec::new();
+
+    for note in &notes {
+        if let Some(window) = app.get_webview_window(&note_label(&note.id)) {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_skip_taskbar(true);
+            if first.is_none() {
+                first = Some(window);
+            }
+            shown.push(note.id.clone());
+        }
+    }
+
+    if !shown.is_empty() {
+        let _ = state.update(|s| {
+            for note in &mut s.notes {
+                if shown.contains(&note.id) {
+                    note.visible = true;
+                }
+            }
+        });
+    }
+
+    if let Some(window) = first {
+        let _ = window.set_focus();
+    }
+}
+
 fn show_all_notes(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -680,6 +718,16 @@ fn resolve_data_dir(default_dir: &Path) -> (PathBuf, bool) {
 
 pub fn run() {
     tauri::Builder::default()
+        // 单实例锁必须是「第一个注册」的插件（插件自身的硬性要求）。
+        // 第二次双击 exe 时：新进程由插件直接退出，回调在已存在的实例里把便签唤回前台。
+        // 注意按应用 identifier 判定，所以便携模式的两份拷贝同机运行也只会有一份活着。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            let app = app.clone();
+            // 回调不保证在主线程，窗口操作统一挪回主线程执行
+            let _ = app.clone().run_on_main_thread(move || {
+                focus_existing_notes(&app);
+            });
+        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
