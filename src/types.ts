@@ -1,3 +1,7 @@
+import type { FontSize, NoteColor, NoteTheme } from "./theme";
+
+export type { FontSize, NoteColor, NoteStyle, NoteTheme } from "./theme";
+
 export type TodoItem = {
   id: string;
   text: string;
@@ -11,15 +15,24 @@ export type WindowGeometry = {
   height: number;
 };
 
-export type Settings = {
-  alwaysOnTop: boolean;
-  autostart: boolean;
-};
-
-/** 与 Rust 侧 `store::Store` 一一对应（serde camelCase） */
-export type Store = {
+/** 与 Rust 侧 `store::Note` 一一对应（serde camelCase） */
+export type Note = {
+  id: string;
+  title: string;
   text: string;
   todos: TodoItem[];
-  settings: Settings;
-  window: WindowGeometry | null;
+  color: NoteColor;
+  theme: NoteTheme;
+  fontSize: FontSize;
+  opacity: number;
+  pinned: boolean;
+  visible: boolean;
+  bounds: WindowGeometry | null;
+};
+
+/** `get_note_state` 的返回：当前窗口对应的那张便签 + 全局设置 */
+export type NoteState = {
+  note: Note;
+  autostart: boolean;
+  storePath: string;
 };
