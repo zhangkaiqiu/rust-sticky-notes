@@ -11,6 +11,7 @@ mod store;
 mod win_desktop_pin;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -639,6 +640,42 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------- 便携模式
+
+/// 解析数据目录：
+/// - exe 同目录存在 `portable.txt` → 便携模式，数据跟着 exe 走；
+/// - 否则用系统默认的 AppData 目录（行为与旧版完全一致）。
+///
+/// 便携模式首次启动时，如果 exe 同目录还没有 `store.json`，会把 AppData 里那份复制过来，
+/// 避免从安装版切过来丢数据；反向不做任何同步。
+fn resolve_data_dir(default_dir: &Path) -> (PathBuf, bool) {
+    let Ok(exe) = std::env::current_exe() else {
+        return (default_dir.to_path_buf(), false);
+    };
+    let Some(exe_dir) = exe.parent() else {
+        return (default_dir.to_path_buf(), false);
+    };
+    if !exe_dir.join("portable.txt").is_file() {
+        return (default_dir.to_path_buf(), false);
+    }
+
+    let portable_store = exe_dir.join("store.json");
+    if !portable_store.exists() {
+        let source = default_dir.join("store.json");
+        if source.exists() {
+            match std::fs::copy(&source, &portable_store) {
+                Ok(_) => println!(
+                    "[store] 便携模式首次启动：已从 {} 复制数据",
+                    source.display()
+                ),
+                Err(err) => eprintln!("[store] 便携模式复制数据失败：{err}"),
+            }
+        }
+    }
+
+    (exe_dir.to_path_buf(), true)
+}
+
 // ---------------------------------------------------------------- entry
 
 pub fn run() {
@@ -650,9 +687,16 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            let data_dir = app.path().app_data_dir()?;
+            let default_dir = app.path().app_data_dir()?;
+            let (data_dir, portable) = resolve_data_dir(&default_dir);
             std::fs::create_dir_all(&data_dir)?;
             let store_path = data_dir.join("store.json");
+
+            if portable {
+                println!("[store] 便携模式：exe 同目录存在 portable.txt");
+            }
+            // 排查数据到底写在哪儿：便携模式 / AppData 一眼可见
+            println!("[store] 数据文件: {}", store_path.display());
 
             let loaded = store::load(&store_path);
             let mut data = loaded.store;

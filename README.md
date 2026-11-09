@@ -39,7 +39,7 @@ rust-sticky-notes/
 │   ├── types.ts                # 与 Rust store 结构对应
 │   ├── styles.css              # Tailwind + 主题变量 / 滚动条 / 滑块
 │   └── components/
-│       ├── TopBar.tsx          # 拖动区 + 图钉（旋转 45°）+ 设置
+│       ├── TopBar.tsx          # 拖动区 + 可编辑标题 + 图钉（旋转 45°）+ 设置
 │       ├── TodoList.tsx        # 待办增删改勾选
 │       ├── SettingsPanel.tsx   # 配色/字号/主题/透明度 + 置顶/自启/隐藏/删除/退出
 │       └── icons.tsx           # 内联 SVG，无图标库依赖
@@ -165,6 +165,29 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
   若旧数据里已有 `style`（任务二版本）则继承，否则用默认奶油/浅色/中/97%
 - 迁移成功后立即按 v2 落盘，因此重复启动不会再走迁移分支（幂等），也不会重复备份
 
+## 便携模式
+
+默认数据放在 `%APPDATA%\com.ruststicky.notes\store.json`。如果想让数据跟着程序走（U 盘、绿色版）：
+
+1. 把 `rust-sticky-notes.exe` 放到一个有写权限的目录；
+2. 在 exe 同目录新建一个空的 `portable.txt`（文件名固定，内容不校验）；
+3. 启动程序。启动日志会打印 `[store] 便携模式：...` 和 `[store] 数据文件: <绝对路径>`。
+
+行为：
+
+- 便携模式下 `store.json` 写在 **exe 同目录**（和 `portable.txt` 并排），v1 迁移产生的
+  `store.v1.bak.json` 也在同一目录；
+- **首次**便携启动时，如果 exe 同目录没有 `store.json` 而 AppData 有，会复制一份过去，避免切换模式丢数据；
+- 删掉 `portable.txt` 再启动就回到 AppData 那份数据。**不做反向同步，也不删除任何文件**，两边各自独立；
+- 多窗口写盘仍然只有一把锁（Rust 侧唯一的 `Mutex<Store>`），路径变了但并发安全不变。
+
+注意：
+
+- 便携目录必须可写（放在 `Program Files` 之类只读目录会写盘失败）；
+- exe 和 `store.json` 要一起搬走；只搬 exe 会得到一份全新的空便签；
+- 便携模式下开机自启注册的仍是**当前 exe 的绝对路径**：exe 被移动或改名后自启会失效，需要重新开关一次；
+- 便携数据和 AppData 数据完全独立，切换模式前建议先备份 `store.json`。
+
 ## 托盘菜单
 
 | 菜单项 | 行为 |
@@ -201,6 +224,19 @@ Node 24.21.0、WebView2 157、3840×2160 @200% DPI。
 - 图钉置顶态：`aria-pressed=true`、transform 为 45° 旋转矩阵、颜色加深、无背景块
 - 重启后两张便签的内容 / 样式 / 置顶 / 位置全部还原，备份文件哈希不变
 - `SetWindowPos` 把其中一张挪到 300,200 / 900×700，400ms 防抖后只更新该便签的 `bounds`
+- 标题：点标题原地变输入框并全选，回车提交；空标题保存后回落「便签」；`Esc` 取消不写盘；
+  `maxLength=60`，长标题单行省略且 `title` 属性保留全文；
+  `document.title` + `set_title` 同步后，Alt+Tab / 任务管理器显示的是便签名
+- 真实鼠标：点标题后 DOM 焦点落在标题输入框（进入编辑态、窗口不位移）；在标题右侧空白处拖动，
+  窗口从 2105,718 移到 2205,818，400ms 后该便签的 `bounds` 同步更新
+- 删除：设置面板「删除此便签」有二次确认，确认后窗口销毁、`notes[]` 对应项移除；
+  删掉最后一张后进程自动退出，退出前 `notes: []` 已落盘
+- Win+D（两张都未置顶，最大化记事本盖住便签）：覆盖时中心像素 `#272727` →
+  第一次 Win+D 后 `#F9F4D4` / `#2B232D`（浮在桌面，桌面 `Program Manager` 在前台）→
+  第二次 Win+D 后恢复 `#272727`（记事本重新盖住，`IsIconic=false`，没有被最小化）
+- 便携模式：在 `target/release` 放 `portable.txt`、故意从 `%TEMP%` 作为工作目录启动，
+  `store.json` 仍生成在 exe 同目录（内容从 AppData 复制，1 条便签）；便携模式里的编辑只写 exe 目录那份；
+  删掉 `portable.txt` 重启回到 AppData 数据，exe 目录那份哈希不变
 
 ## 启动速度怎么测
 
