@@ -60,6 +60,15 @@ export default function App() {
         setAutostart(snapshot.autostart);
         setStyle(normalizeStyle(snapshot.note));
         setStorePath(snapshot.storePath);
+        // 图钉图标以**窗口真实层级**为准：store 里的 pinned 只是期望值，
+        // 启动时应用可能会被后续的层级操作覆盖（见 win_desktop_pin 顶部 BUG 2 说明）。
+        // 只在这一刻回读一次，不做轮询。
+        try {
+          const actual = await api.alwaysOnTop();
+          if (alive) setPinned(actual);
+        } catch {
+          // 查询失败就沿用 store 里的值，不阻塞启动
+        }
       } catch (err) {
         if (alive) setError(`读取本地数据失败：${String(err)}`);
       } finally {
@@ -224,7 +233,17 @@ export default function App() {
     const next = !pinned;
     setPinned(next);
     try {
-      await api.setPinned(next);
+      // 后端回读 exstyle 后返回**真实**状态：图标跟着它走，
+      // 避免"界面说钉住、窗口其实没钉住"的状态漂移。
+      const actual = await api.setPinned(next);
+      setPinned(actual);
+      if (actual !== next) {
+        setError(
+          actual
+            ? "置顶没有生效（窗口层级未被系统接受），已按实际状态显示"
+            : "取消置顶没有生效，已按实际状态显示",
+        );
+      }
     } catch (err) {
       setPinned(!next);
       setError(`切换置顶失败：${String(err)}`);

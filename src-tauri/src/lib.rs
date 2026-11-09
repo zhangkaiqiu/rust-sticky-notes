@@ -214,39 +214,72 @@ fn set_note_title(
     Ok(normalized)
 }
 
+/// 查询当前便签窗口**实际**的置顶状态（读 `WS_EX_TOPMOST`，不是内存里的 JSON）。
+///
+/// 前端用它校准图钉图标：只要图标与真实层级不一致，就以这个返回值为准。
+/// 不做轮询，只在拿到快照 / 切换图钉后各读一次。
+#[tauri::command]
+fn get_note_always_on_top(app: AppHandle, window: Window) -> Result<bool, String> {
+    let label = window.label().to_string();
+    let webview = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("便签窗口不存在：{label}"))?;
+    #[cfg(windows)]
+    {
+        Ok(win_desktop_pin::is_always_on_top(&webview))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(webview.is_always_on_top().unwrap_or(false))
+    }
+}
+
 #[tauri::command]
 fn set_note_pinned(
     app: AppHandle,
     window: Window,
     state: State<'_, AppState>,
     pinned: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let id = require_note_id(&window)?;
-    // 幂等：值没变就什么都不做。
+    let label = window.label().to_string();
+    let webview = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("便签窗口不存在：{label}"))?;
+
+    // 幂等：值没变、且实际层级已经对得上，就什么都不做。
     // 这是运行时唯一的置顶入口，重复调 tao 的 set_always_on_top(false) 会走
     // SetWindowPos(HWND_NOTOPMOST)，副作用是把窗口顶到普通层最前面（见 win_desktop_pin
     // 顶部注释），表现就是后台便签突然盖住前台应用。所以必须先比对再动手。
+    // 注意要同时比对"内存状态"和"真实 exstyle"：重启后可能出现两者不一致的情况，
+    // 此时不能因为值没变就直接返回，否则永远修不回来。
     let current = state.read(|s| s.notes.iter().find(|n| n.id == id).map(|n| n.pinned))?;
-    if current == Some(pinned) {
-        return Ok(());
+    #[cfg(windows)]
+    let actual_now = win_desktop_pin::is_always_on_top(&webview);
+    #[cfg(not(windows))]
+    let actual_now = webview.is_always_on_top().unwrap_or(false);
+    if current == Some(pinned) && actual_now == pinned {
+        return Ok(actual_now);
     }
 
-    let label = window.label().to_string();
-    if let Some(webview) = app.get_webview_window(&label) {
-        webview
-            .set_always_on_top(pinned)
-            .map_err(|e| format!("设置置顶失败：{e}"))?;
-        // 取消置顶后必须把窗口重新垫回"桌面之上、其它窗口之下"：
-        // HWND_NOTOPMOST 会把它留在普通层最前面，不补这一下就会飘在前台应用之上
-        #[cfg(windows)]
-        win_desktop_pin::set_user_pinned(&webview, pinned);
-    }
+    webview
+        .set_always_on_top(pinned)
+        .map_err(|e| format!("设置置顶失败：{e}"))?;
+    // 取消置顶后必须把窗口重新垫回"桌面之上、其它窗口之下"：
+    // HWND_NOTOPMOST 会把它留在普通层最前面，不补这一下就会飘在前台应用之上。
+    // 同时把**其它**未置顶便签压回去：激活动作会把同 owner 组的兄弟窗口一起抬起来。
+    #[cfg(windows)]
+    let actual = win_desktop_pin::set_user_pinned(&webview, pinned);
+    #[cfg(not(windows))]
+    let actual = webview.is_always_on_top().unwrap_or(pinned);
 
+    // 落盘的是"真实生效的状态"，避免图标说钉住、实际没钉住
     state.update(move |s| {
         if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
-            note.pinned = pinned;
+            note.pinned = actual;
         }
-    })
+    })?;
+    Ok(actual)
 }
 
 /// 折叠 / 展开当前便签。
@@ -484,15 +517,21 @@ fn create_note_window(
     // 窗口是 visible:false 创建后再 show 的，Windows 上有一定概率把任务栏按钮带回来，
     // 这里显式再删一次（底层是 ITaskbarList::DeleteTab）
     let _ = window.set_skip_taskbar(true);
-    if focus {
-        let _ = window.set_focus();
-    }
 
     attach_window_events(app, &window);
 
-    // 抵抗 Win+D：把桌面窗口设成便签的 owner，再把便签垫到桌面之上、其它窗口之下
+    // 抵抗 Win+D：把桌面窗口设成便签的 owner，再把便签垫到桌面之上、其它窗口之下。
+    // 顺序很重要：必须在 show 之后（窗口已可见才有 z 序可言），并且在 focus 之前
+    // （激活会把同 owner 组的兄弟窗口一起抬起来，见 win_desktop_pin 顶部 BUG 1 说明）。
     #[cfg(windows)]
     win_desktop_pin::install(&window, note.pinned);
+
+    if focus {
+        let _ = window.set_focus();
+        // 激活之后同 owner 组的未置顶便签会被连带抬起，补一刀压回去
+        #[cfg(windows)]
+        win_desktop_pin::park_siblings_after_activation(&window);
+    }
 
     Ok(window)
 }
@@ -568,6 +607,15 @@ fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
         // 事件里的是物理像素，混着用会把窗口存小。统一在防抖后从窗口本身读一次。
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
             schedule_geometry_persist(&app, &label);
+        }
+        // 便签被激活（用户点它、或程序 focus）时，Windows 会把同一 owner 组
+        // （owner = Progman）的其它便签一起抬到普通层最前面。这正是"点 A 的图钉，
+        // B 窜到前台应用之上"的直接原因，所以在激活之后把其它未置顶的便签压回去。
+        WindowEvent::Focused(true) => {
+            #[cfg(windows)]
+            if let Some(win) = app.get_webview_window(&label) {
+                win_desktop_pin::park_siblings_after_activation(&win);
+            }
         }
         WindowEvent::CloseRequested { api, .. } => {
             // 没有系统标题栏，这里只兜底：关窗 = 收进托盘
@@ -1135,6 +1183,7 @@ pub fn run() {
             set_note_title,
             set_note_style,
             set_note_pinned,
+            get_note_always_on_top,
             set_note_collapsed,
             create_note,
             delete_note,
