@@ -1,3 +1,7 @@
+import type { NoteStyle } from "./theme";
+
+export type { NoteStyle } from "./theme";
+
 export type TodoItem = {
   id: string;
   text: string;
@@ -22,4 +26,5 @@ export type Store = {
   todos: TodoItem[];
   settings: Settings;
   window: WindowGeometry | null;
+  style: NoteStyle;
 };

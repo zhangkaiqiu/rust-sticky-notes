@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Store, TodoItem } from "./types";
+import type { NoteStyle, Store, TodoItem } from "./types";
 
 /**
  * 所有前端 → 后端的调用集中在这里。
@@ -10,6 +10,7 @@ export const api = {
   loadState: () => invoke<Store>("load_state"),
   saveNote: (text: string, todos: TodoItem[]) =>
     invoke<void>("save_note", { text, todos }),
+  saveStyle: (style: NoteStyle) => invoke<void>("save_style", { style }),
   setPinned: (pinned: boolean) => invoke<void>("set_pinned", { pinned }),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   getStorePath: () => invoke<string>("get_store_path"),

@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import type { TodoItem } from "./types";
+import { normalizeStyle, styleVars } from "./theme";
+import type { NoteStyle } from "./theme";
 import TopBar from "./components/TopBar";
 import TodoList from "./components/TodoList";
 import SettingsPanel from "./components/SettingsPanel";
@@ -18,6 +20,7 @@ export default function App() {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [pinned, setPinned] = useState(false);
   const [autostart, setAutostart] = useState(false);
+  const [style, setStyle] = useState<NoteStyle>(() => normalizeStyle(null));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [storePath, setStorePath] = useState("");
   const [savedTick, setSavedTick] = useState(0);
@@ -34,6 +37,7 @@ export default function App() {
         setTodos(state.todos);
         setPinned(state.settings.alwaysOnTop);
         setAutostart(state.settings.autostart);
+        setStyle(normalizeStyle(state.style));
         setStorePath(await api.getStorePath());
       } catch (err) {
         if (alive) setError(`读取本地数据失败：${String(err)}`);
@@ -66,7 +70,27 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [text, todos, ready]);
 
-  // 3) Esc 关闭设置面板
+  // 3) 外观改动防抖落盘（拖动透明度滑块时实时预览，停手 300ms 后写盘）
+  const skipFirstStyleSave = useRef(true);
+  useEffect(() => {
+    if (!ready) return;
+    if (skipFirstStyleSave.current) {
+      skipFirstStyleSave.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      api
+        .saveStyle(style)
+        .then(() => {
+          setSavedTick((n) => n + 1);
+          setError(null);
+        })
+        .catch((err) => setError(`保存外观失败：${String(err)}`));
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [style, ready]);
+
+  // 4) Esc 关闭设置面板
   useEffect(() => {
     if (!settingsOpen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -76,7 +100,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [settingsOpen]);
 
-  // 4) 错误提示自动消失
+  // 5) 错误提示自动消失
   useEffect(() => {
     if (!error) return;
     const t = window.setTimeout(() => setError(null), 5000);
@@ -109,6 +133,10 @@ export default function App() {
     setTodos((prev) => prev.filter((item) => !item.done));
   }, []);
 
+  const updateStyle = useCallback((patch: Partial<NoteStyle>) => {
+    setStyle((prev) => normalizeStyle({ ...prev, ...patch }));
+  }, []);
+
   const togglePin = useCallback(async () => {
     const next = !pinned;
     setPinned(next);
@@ -138,9 +166,17 @@ export default function App() {
     void api.quitApp();
   }, []);
 
+  const vars = useMemo(() => styleVars(style), [style]);
+  // 低透明度时补一圈极轻的内描边，避免卡片"只剩文字"
+  const lowOpacity = style.opacity < 0.6;
+
   return (
-    <div className="h-full w-full">
-      <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[18px] border border-amber-900/15 bg-[#FFF8D6]/[0.97]">
+    <div className="note-root h-full w-full" style={vars}>
+      <div
+        className={`note-card relative flex h-full w-full flex-col overflow-hidden rounded-[18px] border ${
+          lowOpacity ? "note-card-edge" : ""
+        }`}
+      >
         <TopBar
           pinned={pinned}
           savedTick={savedTick}
@@ -154,10 +190,10 @@ export default function App() {
           onChange={(e) => setText(e.target.value)}
           spellCheck={false}
           placeholder="写点什么…"
-          className="min-h-[72px] flex-1 resize-none bg-transparent px-4 pb-1 pt-0.5 text-[13.5px] leading-relaxed text-stone-800 outline-none placeholder:text-stone-500/50"
+          className="note-placeholder note-text note-scroll min-h-[72px] flex-1 resize-none bg-transparent px-4 pb-1 pt-0.5 text-[0.84375em] leading-relaxed outline-none"
         />
 
-        <div className="mx-3 h-px shrink-0 bg-amber-900/10" />
+        <div className="note-divider mx-3 h-px shrink-0" />
 
         <TodoList
           todos={todos}
@@ -169,7 +205,7 @@ export default function App() {
         />
 
         {error && (
-          <div className="px-4 pb-2 text-[11px] leading-snug text-red-600/90">
+          <div className="note-danger px-4 pb-2 text-[0.6875em] leading-snug">
             {error}
           </div>
         )}
@@ -180,6 +216,8 @@ export default function App() {
           pinned={pinned}
           autostart={autostart}
           storePath={storePath}
+          style={style}
+          onStyleChange={updateStyle}
           onTogglePin={togglePin}
           onToggleAutostart={toggleAutostart}
           onHide={hideToTray}

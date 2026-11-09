@@ -33,7 +33,7 @@ export default function TopBar({
     >
       <span
         data-tauri-drag-region
-        className="pointer-events-none text-[10px] font-semibold uppercase tracking-[0.16em] text-amber-900/45"
+        className="note-label pointer-events-none text-[0.625em] font-semibold uppercase tracking-[0.16em]"
       >
         便签
       </span>
@@ -42,7 +42,7 @@ export default function TopBar({
       <div data-tauri-drag-region className="pointer-events-none h-full flex-1" />
 
       <span
-        className={`mr-0.5 text-[10px] text-amber-900/40 transition-opacity duration-300 ${
+        className={`note-faint mr-0.5 text-[0.625em] transition-opacity duration-300 ${
           justSaved ? "opacity-100" : "opacity-0"
         }`}
       >
@@ -52,7 +52,7 @@ export default function TopBar({
       {/*
         图钉只有两种视觉状态，不再画外圈 / 底色块：
         - 未置顶：竖直、淡色，hover 变深；
-        - 置顶：整体旋转 45°（斜着的图钉），直接保持深色。
+        - 置顶：整体旋转 45°（斜着的图钉），保持深色。
         旋转加在 svg 自身上（transform-origin 居中），按钮 padding 留白足够、
         且没有 overflow-hidden，所以旋转后不会被裁切，点击热区也不变。
       */}
@@ -61,13 +61,11 @@ export default function TopBar({
         title={pinned ? "取消置顶" : "置顶"}
         aria-pressed={pinned}
         onClick={onTogglePin}
-        className="group flex items-center justify-center rounded-full p-[7px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-900/25"
+        className="note-icon-btn note-focus group flex items-center justify-center rounded-full p-[7px] focus-visible:outline-none"
       >
         <PinIcon
-          className={`h-[15px] w-[15px] overflow-visible transition-[transform,color] duration-200 ease-out ${
-            pinned
-              ? "rotate-45 text-amber-900/80"
-              : "text-amber-900/55 group-hover:text-amber-900/80"
+          className={`h-[0.9375em] w-[0.9375em] overflow-visible transition-[transform,color] duration-200 ease-out ${
+            pinned ? "rotate-45" : ""
           }`}
         />
       </button>
@@ -77,13 +75,13 @@ export default function TopBar({
         title="设置"
         aria-expanded={settingsOpen}
         onClick={onToggleSettings}
-        className={`rounded-full p-1.5 transition-colors ${
+        className={`note-focus rounded-full p-[7px] focus-visible:outline-none ${
           settingsOpen
-            ? "bg-amber-900/12 text-amber-900/85"
-            : "text-amber-900/55 hover:bg-amber-900/10 hover:text-amber-900/80"
+            ? "note-icon-btn-active transition-colors"
+            : "note-icon-btn"
         }`}
       >
-        <GearIcon className="h-[15px] w-[15px]" />
+        <GearIcon className="h-[0.9375em] w-[0.9375em]" />
       </button>
     </div>
   );

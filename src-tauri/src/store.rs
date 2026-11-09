@@ -18,6 +18,51 @@ pub struct Settings {
     pub autostart: bool,
 }
 
+/// 便签外观。默认值必须和改造前的奶油色观感一致。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NoteStyle {
+    pub color: String,
+    pub theme: String,
+    pub font_size: String,
+    /// 卡片表面透明度（0.35–1），只影响底色和边框，不影响文字
+    pub opacity: f64,
+}
+
+impl Default for NoteStyle {
+    fn default() -> Self {
+        Self {
+            color: "cream".to_string(),
+            theme: "light".to_string(),
+            font_size: "md".to_string(),
+            opacity: 0.97,
+        }
+    }
+}
+
+impl NoteStyle {
+    /// 归一化非法值：配色 / 主题 / 字号走白名单，透明度 clamp 到 35%–100%
+    pub fn normalized(mut self) -> Self {
+        const COLORS: [&str; 6] = ["cream", "mint", "rose", "sky", "sand", "graphite"];
+        const FONT_SIZES: [&str; 3] = ["sm", "md", "lg"];
+
+        if !COLORS.contains(&self.color.as_str()) {
+            self.color = "cream".to_string();
+        }
+        if self.theme != "light" && self.theme != "dark" {
+            self.theme = "light".to_string();
+        }
+        if !FONT_SIZES.contains(&self.font_size.as_str()) {
+            self.font_size = "md".to_string();
+        }
+        if !self.opacity.is_finite() {
+            self.opacity = 0.97;
+        }
+        self.opacity = self.opacity.clamp(0.35, 1.0);
+        self
+    }
+}
+
 /// 窗口位置/大小，单位是物理像素（Tauri 事件给的就是物理像素）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -36,15 +81,23 @@ pub struct Store {
     pub todos: Vec<TodoItem>,
     pub settings: Settings,
     pub window: Option<WindowGeometry>,
+    /// 便签外观（配色 / 字号 / 主题 / 透明度）
+    pub style: NoteStyle,
 }
 
 /// 读取失败（首次运行 / 文件损坏）一律回落到默认值，不阻塞启动
 pub fn load(path: &Path) -> Store {
     match std::fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|err| {
-            eprintln!("[store] 解析 {} 失败，使用默认数据：{err}", path.display());
-            Store::default()
-        }),
+        Ok(raw) => match serde_json::from_str::<Store>(&raw) {
+            Ok(mut data) => {
+                data.style = data.style.clone().normalized();
+                data
+            }
+            Err(err) => {
+                eprintln!("[store] 解析 {} 失败，使用默认数据：{err}", path.display());
+                Store::default()
+            }
+        },
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
                 eprintln!("[store] 读取 {} 失败：{err}", path.display());

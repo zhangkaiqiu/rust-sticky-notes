@@ -21,7 +21,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 
-use store::{Store, TodoItem, WindowGeometry};
+use store::{NoteStyle, Store, TodoItem, WindowGeometry};
 
 /// 主窗口标签，前后端统一用 "main"
 const MAIN_WINDOW: &str = "main";
@@ -67,6 +67,14 @@ fn save_note(
         s.todos = todos;
     })?;
     state.persist()
+}
+
+#[tauri::command]
+fn save_style(state: State<'_, AppState>, style: NoteStyle) -> Result<NoteStyle, String> {
+    let normalized = style.normalized();
+    state.with_store(|s| s.style = normalized.clone())?;
+    state.persist()?;
+    Ok(normalized)
 }
 
 #[tauri::command]
@@ -353,6 +361,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_state,
             save_note,
+            save_style,
             set_pinned,
             get_autostart,
             set_autostart,

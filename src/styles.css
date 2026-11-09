@@ -28,10 +28,197 @@
   }
 }
 
-/* 细滚动条，贴合便签风格 */
+/* ---------------------------------------------------------------- 主题变量
+ *
+ * 颜色全部走 CSS 变量（通道值），由 `theme.ts` 的 styleVars() 写在便签根节点上。
+ * 字号同理：--note-font-size 决定基准，子元素用 em 按比例缩放。
+ */
+.note-root {
+  font-size: var(--note-font-size, 16px);
+  color: rgb(var(--note-text));
+}
+
+.note-root textarea,
+.note-root input {
+  caret-color: rgb(var(--note-accent));
+}
+
+/* 卡片表面：只有底色和边框受 --note-alpha 影响，文字 / 图标不受影响 */
+.note-card {
+  background-color: rgb(var(--note-surface) / var(--note-alpha, 0.97));
+  border-color: rgb(var(--note-border) / calc(var(--note-alpha, 0.97) * 0.16));
+}
+
+/* 低透明度时加一圈极轻的内描边，帮助分辨卡片边界（默认 97% 时不出现） */
+.note-card-edge {
+  box-shadow:
+    inset 0 0 0 1px rgb(var(--note-border) / 0.3),
+    inset 0 1px 0 rgb(255 255 255 / 0.06);
+}
+
+.note-divider {
+  background-color: rgb(var(--note-border) / calc(var(--note-alpha, 0.97) * 0.11));
+}
+
+.note-text {
+  color: rgb(var(--note-text));
+}
+
+.note-muted {
+  color: rgb(var(--note-muted) / 0.8);
+}
+
+.note-muted-soft {
+  color: rgb(var(--note-muted) / 0.62);
+}
+
+/* 次要标签（顶部"便签"、TODO 标题等）用图标色 + 低 alpha */
+.note-label {
+  color: rgb(var(--note-icon) / 0.45);
+}
+
+.note-faint {
+  color: rgb(var(--note-icon) / 0.4);
+}
+
+.note-icon-btn {
+  color: rgb(var(--note-icon) / 0.55);
+  transition: color 200ms ease-out;
+}
+
+.note-icon-btn:hover {
+  color: rgb(var(--note-icon) / 0.82);
+}
+
+/* 图钉置顶态：深色，且没有外圈 / 底色块 */
+.note-icon-strong,
+.note-icon-btn[aria-pressed="true"] {
+  color: rgb(var(--note-icon) / 0.82);
+}
+
+/* 设置按钮展开时的轻底色（图钉按钮不用，避免出现"按住"的观感） */
+.note-icon-btn-active {
+  color: rgb(var(--note-icon) / 0.85);
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.12));
+}
+
+.note-hover {
+  transition: background-color 140ms ease-out, color 140ms ease-out;
+}
+
+.note-hover:hover {
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.09));
+}
+
+.note-hover-soft:hover,
+.note-hover-soft:focus-visible {
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.05));
+}
+
+.note-subtle-bg {
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.05));
+}
+
+.note-subtle-bg-strong {
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.08));
+}
+
+.note-accent-bg {
+  background-color: rgb(var(--note-accent));
+  color: rgb(var(--note-on-accent));
+}
+
+.note-danger {
+  color: rgb(var(--note-danger));
+}
+
+.note-clear-hover:hover {
+  color: rgb(var(--note-danger));
+}
+
+.note-input-bar {
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.05));
+  transition: background-color 140ms ease-out;
+}
+
+.note-input-bar:focus-within {
+  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.08));
+}
+
+.note-danger-hover:hover {
+  color: rgb(var(--note-danger));
+  background-color: rgb(var(--note-danger) / 0.1);
+}
+
+.note-panel {
+  background-color: rgb(var(--note-panel) / var(--note-panel-alpha, 0.97));
+  border-color: rgb(var(--note-border) / 0.16);
+}
+
+.note-switch-off {
+  background-color: rgb(var(--note-switch-off));
+}
+
+.note-checkbox {
+  border-color: rgb(var(--note-border) / calc(var(--note-alpha, 0.97) * 0.28));
+}
+
+.note-checkbox:hover {
+  border-color: rgb(var(--note-accent) / 0.7);
+}
+
+.note-placeholder::placeholder {
+  color: rgb(var(--note-muted) / 0.5);
+}
+
+.note-focus:focus-visible {
+  outline: 2px solid rgb(var(--note-accent) / 0.6);
+  outline-offset: 1px;
+}
+
+/* 透明度滑块 */
+.note-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: rgb(var(--note-icon) / 0.18);
+  outline: none;
+  cursor: pointer;
+}
+
+.note-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  background: rgb(var(--note-accent));
+  border: 2px solid rgb(var(--note-panel));
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+  cursor: pointer;
+}
+
+.note-range:focus-visible {
+  outline: 2px solid rgb(var(--note-accent) / 0.6);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------- 滚动条 */
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
+}
+
+/* 便签内部的滚动条跟随当前配色 / 主题 */
+.note-root ::-webkit-scrollbar-thumb {
+  background: rgb(var(--note-icon) / 0.22);
+  border-radius: 999px;
+}
+
+.note-root ::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--note-icon) / 0.38);
 }
 
 ::-webkit-scrollbar-thumb {
