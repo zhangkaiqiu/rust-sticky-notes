@@ -3,7 +3,7 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "./api";
 import type { TodoItem } from "./types";
-import { normalizeStyle, styleVars } from "./theme";
+import { normalizeStyle, styleVars, FONT_SIZES } from "./theme";
 import type { NoteStyle } from "./theme";
 import TopBar from "./components/TopBar";
 import TodoList from "./components/TodoList";
@@ -38,6 +38,9 @@ export default function App() {
   /** 当前右键命中的输入元素，以及右键瞬间的选区（菜单点击会让输入框失焦） */
   const fieldRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
   const selectionRef = useRef<{ start: number; end: number } | null>(null);
+  /** Ctrl+滚轮调字号的轻提示（卡片角落浮出 1 秒后淡出） */
+  const [fontToast, setFontToast] = useState<{ id: number; label: string } | null>(null);
+  const fontToastTimer = useRef<number | null>(null);
   const [storePath, setStorePath] = useState("");
   const [savedTick, setSavedTick] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -108,15 +111,62 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [style, ready]);
 
-  // 4) Esc 关闭设置面板
+  // 4) Ctrl + 滚轮调字号：上滚变大、下滚变小，到顶 / 到底停住（不回绕）。
+  //    React 的 onWheel 在根节点上是 passive 的，preventDefault 无效，WebView2 会把整页缩放，
+  //    所以必须用原生非 passive 监听。styleRef 保证监听只注册一次也能拿到最新字号。
+  const showFontToast = useCallback((label: string) => {
+    setFontToast({ id: Date.now(), label });
+    if (fontToastTimer.current) window.clearTimeout(fontToastTimer.current);
+    fontToastTimer.current = window.setTimeout(() => setFontToast(null), 1300);
+  }, []);
+
+  const styleRef = useRef(style);
+  useEffect(() => {
+    styleRef.current = style;
+  }, [style]);
+
+  useEffect(() => {
+    if (!ready) return;
+
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+
+      const currentStyle = styleRef.current;
+      const current = FONT_SIZES.findIndex((f) => f.id === currentStyle.fontSize);
+      const index = current < 0 ? 1 : current;
+      const nextIndex = event.deltaY < 0 ? index + 1 : index - 1;
+      const clamped = Math.min(FONT_SIZES.length - 1, Math.max(0, nextIndex));
+      if (clamped === index) return;
+
+      const nextFontSize = FONT_SIZES[clamped];
+      setStyle(normalizeStyle({ ...currentStyle, fontSize: nextFontSize.id }));
+      showFontToast(nextFontSize.label);
+    };
+
+    // passive: false 才能 preventDefault，挡住 WebView2 自带的 Ctrl+滚轮缩放
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
+  }, [ready, showFontToast]);
+
+  // 4.1) 字号提示：1.3 秒后（含淡出动画）卸载
+  useEffect(() => {
+    return () => {
+      if (fontToastTimer.current) window.clearTimeout(fontToastTimer.current);
+    };
+  }, []);
+
+  // 5) Esc 关闭设置面板
   useEffect(() => {
     if (!settingsOpen) return;
+    // 右键菜单打开时，Esc 先关菜单（ContextMenu 在捕获阶段处理），这里让路
+    if (menu) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setSettingsOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [settingsOpen]);
+  }, [settingsOpen, menu]);
 
   // 5) 同步 HTML 文档标题：WebView2 会把 document.title 反映到窗口标题，
   // 这样 Alt+Tab / 任务管理器里显示的就是便签自己的名字。
@@ -438,6 +488,16 @@ export default function App() {
               </div>
             )}
           </>
+        )}
+
+        {/* Ctrl+滚轮调字号的轻提示：角落浮出约 1 秒后淡出，不用 alert */}
+        {fontToast && (
+          <div
+            key={fontToast.id}
+            className="note-toast note-subtle-bg-strong note-text pointer-events-none absolute bottom-3 right-3 rounded-full px-2.5 py-1 text-[0.6875em] shadow-sm"
+          >
+            字号：{fontToast.label}
+          </div>
         )}
       </div>
 

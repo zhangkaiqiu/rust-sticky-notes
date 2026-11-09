@@ -125,6 +125,10 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 - **每日自动备份**：每天第一次落盘前把当前 `store.json` 复制成同目录 `store.YYYYMMDD.json`
   （本地日期），只保留最近 7 份，更早的自动删除；便携模式下备份跟随 `store.json` 所在目录；
   备份失败只记日志，不影响保存
+- **Ctrl + 滚轮调字号**：便签内按住 `Ctrl` 上滚变大、下滚变小，在「小 / 中 / 大」三档之间移动
+  （到顶 / 到底停住，不回绕）；变更走同一套 300ms 防抖落盘，卡片右下角浮出「字号：中」约 1 秒后淡出
+  （CSS 动画，不用 `alert`），设置面板里的字号档位同步高亮。`wheel` 用原生 **非 passive** 监听并
+  `preventDefault()`，避免 WebView2 把整页缩放掉
 - **右键菜单**：正文 / 标题输入框右键有「剪切 / 复制 / 粘贴 / 全选」+ 便签操作；卡片空白处右键
   是「新建便签 / 折叠 / 设置 / 删除便签」。菜单是纯 HTML/CSS 实现（不用原生菜单），点外部 / Esc /
   滚动即关闭，贴近窗口右 / 下边缘会自动翻转；剪贴板走 `tauri-plugin-clipboard-manager`，
@@ -429,10 +433,14 @@ src-tauri\target\release\rust-sticky-notes.exe
 ## 下一步
 
 1. 全局快捷键（`tauri-plugin-global-shortcut`，例如 `Ctrl+Alt+N` 唤回）
-2. 窗口贴边吸附、记住每块显示器上的位置（存 logical 坐标 + DPI）
-3. 设置面板里提供"把当前外观设为新便签默认"
-4. 自动保存提示细化（脏标记、退出前 flush 的可见反馈）
-5. 监听 `TaskbarCreated` 后自动重绑 Progman，修复 explorer 重启导致的 Win+D 失效
+2. TODO 提醒（到点提醒 / 托盘气泡）
+3. 全文搜索（跨便签搜标题与正文）
+4. Markdown 渲染
+5. 窗口贴边吸附、记住每块显示器上的位置（存 logical 坐标 + DPI）
+6. 自动更新（`tauri-plugin-updater`）
+
+（另外留待下一阶段：监听 `TaskbarCreated` 后自动重绑 Progman，修复 explorer 重启导致的 Win+D 失效；
+设置面板里提供"把当前外观设为新便签默认"。）
 
 ## 许可证
 
