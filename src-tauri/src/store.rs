@@ -348,10 +348,115 @@ fn backup_v1(path: &Path) -> std::io::Result<()> {
     std::fs::copy(path, &backup).map(|_| ())
 }
 
+// ---------------------------------------------------------------- 每日备份
+
+/// 每日备份保留的份数（含当天）
+const BACKUP_KEEP: usize = 7;
+
+/// 当天的日期戳 `YYYYMMDD`：用本地时间（用户看到的"今天"）
+#[cfg(windows)]
+fn today_stamp() -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+
+    let time = unsafe { GetLocalTime() };
+    format!("{:04}{:02}{:02}", time.wYear, time.wMonth, time.wDay)
+}
+
+/// 非 Windows（只用于开发期编译 / 调试）的兜底：按 UTC 日期算
+#[cfg(not(windows))]
+fn today_stamp() -> String {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0) as i64;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}{month:02}{day:02}")
+}
+
+#[cfg(not(windows))]
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// 文件名是否形如 `store.YYYYMMDD.json`（只认这种，别误删用户的 `store.v1.bak.json`）
+fn is_backup_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("store.") else {
+        return false;
+    };
+    let Some(stem) = rest.strip_suffix(".json") else {
+        return false;
+    };
+    stem.len() == 8 && stem.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 每天第一次落盘前：把当前 `store.json` 复制成同目录的 `store.YYYYMMDD.json`。
+///
+/// - 当天备份已存在就跳过（所以"每天只备份一次"）；
+/// - 便携模式下 `path` 就是 exe 同目录的 store.json，备份自然跟随，不碰 AppData / 工作目录；
+/// - 任何失败都只记日志，绝不阻断主流程。
+fn backup_if_needed(path: &Path) {
+    if !path.exists() {
+        // 首次运行还没有旧数据可备份
+        return;
+    }
+    let backup = path.with_file_name(format!("store.{}.json", today_stamp()));
+    if backup.exists() {
+        return;
+    }
+    match std::fs::copy(path, &backup) {
+        Ok(_) => println!("[store] 已创建每日备份：{}", backup.display()),
+        Err(err) => {
+            eprintln!("[store] 每日备份失败（忽略，不影响保存）：{err}");
+            return;
+        }
+    }
+    prune_backups(path);
+}
+
+/// 只保留最近 `BACKUP_KEEP` 份 `store.YYYYMMDD.json`
+fn prune_backups(store_path: &Path) {
+    let Some(dir) = store_path.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().to_str().map(|s| s.to_string()))
+        .filter(|name| is_backup_name(name))
+        .collect();
+
+    if names.len() <= BACKUP_KEEP {
+        return;
+    }
+    // 文件名里的日期定长，字典序即时间序
+    names.sort();
+    let excess = names.len() - BACKUP_KEEP;
+    for name in names.into_iter().take(excess) {
+        match std::fs::remove_file(dir.join(&name)) {
+            Ok(_) => println!("[store] 已清理过期备份：{name}"),
+            Err(err) => eprintln!("[store] 清理备份 {name} 失败（忽略）：{err}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------- 落盘
 
 /// 先写临时文件再 rename，避免写一半崩溃把数据写坏
 pub fn save(path: &Path, data: &Store) -> Result<(), String> {
+    // 所有写盘都走这里，所以每日备份只需要挂在这一处
+    backup_if_needed(path);
+
     let json = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
 
     if let Some(dir) = path.parent() {
