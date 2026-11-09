@@ -75,10 +75,10 @@ fn set_pinned(app: AppHandle, state: State<'_, AppState>, pinned: bool) -> Resul
         window
             .set_always_on_top(pinned)
             .map_err(|e| format!("设置置顶失败：{e}"))?;
+        // 取消置顶后要把窗口重新垫回"桌面之上、其它窗口之下"
+        #[cfg(windows)]
+        win_desktop_pin::set_user_pinned(&window, pinned);
     }
-    // 通知 Win+D 模块：这是用户手动置顶，别和临时置顶互相覆盖
-    #[cfg(windows)]
-    win_desktop_pin::set_user_pinned(pinned);
     state.with_store(|s| s.settings.always_on_top = pinned)?;
     state.persist()
 }
@@ -323,7 +323,7 @@ pub fn run() {
             restore_geometry(&window, data.window.as_ref());
             let _ = window.set_always_on_top(data.settings.always_on_top);
             #[cfg(windows)]
-            win_desktop_pin::set_user_pinned(data.settings.always_on_top);
+            win_desktop_pin::set_user_pinned(&window, data.settings.always_on_top);
             let _ = window.show();
             // 窗口是 visible:false 创建后再 show 的，Windows 上有一定概率把任务栏按钮带回来，
             // 这里显式再删一次（底层是 ITaskbarList::DeleteTab）
@@ -338,7 +338,7 @@ pub fn run() {
             attach_window_events(&handle, &window);
             setup_tray(app)?;
 
-            // 抵抗 Win+D：只建立 owner 关系，不改置顶、不改 Z 序语义
+            // 抵抗 Win+D：把桌面窗口设成便签的 owner，再把便签垫到桌面之上、其它窗口之下
             #[cfg(windows)]
             win_desktop_pin::install(&window);
 
