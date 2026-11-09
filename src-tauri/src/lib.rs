@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent, State, WebviewUrl,
@@ -33,6 +33,9 @@ pub struct AppState {
     path: std::path::PathBuf,
     /// 每个窗口几何变化的代次，用来做「安静后才能落盘」的 debounce
     geom_gen: Mutex<HashMap<String, u64>>,
+    /// 当前托盘菜单的句柄。菜单对象必须一直存活（Windows 托盘仍引用它），
+    /// 不能构建完当临时值用完就丢；刷新时整体替换。
+    tray_menu: Mutex<Option<Menu<tauri::Wry>>>,
 }
 
 impl AppState {
@@ -181,6 +184,7 @@ fn set_note_style(
 
 #[tauri::command]
 fn set_note_title(
+    app: AppHandle,
     window: Window,
     state: State<'_, AppState>,
     title: String,
@@ -195,6 +199,8 @@ fn set_note_title(
             note.title = applied;
         }
     })?;
+    // 托盘菜单里的便签名要跟着改
+    schedule_tray_refresh(&app);
     Ok(normalized)
 }
 
@@ -228,6 +234,8 @@ async fn create_note(app: AppHandle) -> Result<String, String> {
     // 主线程一阻塞就会死锁（表现为窗口建出来但是 about:blank）。
     let note = new_note_internal(&app)?;
     create_note_window(&app, &note, true).map_err(|e| format!("创建便签窗口失败：{e}"))?;
+    // 托盘菜单补上这张新便签
+    schedule_tray_refresh(&app);
     Ok(note.id)
 }
 
@@ -243,6 +251,9 @@ fn delete_note(app: AppHandle, window: Window, state: State<'_, AppState>) -> Re
     if let Some(webview) = app.get_webview_window(&label) {
         let _ = webview.destroy();
     }
+
+    // 被删除的便签要从托盘列表里消失
+    schedule_tray_refresh(&app);
 
     if remaining == 0 {
         // 最后一张便签被删除：刷盘后退出，避免留下一个没有任何便签的托盘进程
@@ -620,43 +631,191 @@ fn flush_and_exit(app: &AppHandle) {
     app.exit(0);
 }
 
-fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+/// 托盘菜单里最多列出的便签数，超出的用「…另有 N 张」占位
+const MAX_TRAY_NOTES: usize = 20;
+
+/// 托盘里的便签显示名：默认标题（空 / 「便签」）补上序号，避免一堆同名项
+fn tray_note_title(note: &Note, index: usize) -> String {
+    let title = note.title.trim();
+    if title.is_empty() || title == "便签" {
+        format!("便签 {}", index + 1)
+    } else {
+        title.to_string()
+    }
+}
+
+/// 按当前便签列表构建托盘菜单：便签项（最多 20 条）→ 分隔线 → 原有动作。
+/// 返回的 Menu 由调用方保存（托盘 + AppState 各持一份），不要当临时值丢掉。
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let notes = app
+        .try_state::<AppState>()
+        .and_then(|state| state.read(|s| s.notes.clone()).ok())
+        .unwrap_or_default();
+
+    // 便签项要先全部创建完，下面才能安全地借用它们拼 items
+    let mut note_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
+    for (index, note) in notes.iter().take(MAX_TRAY_NOTES).enumerate() {
+        let label = tray_note_title(note, index);
+        note_items.push(MenuItem::with_id(
+            app,
+            format!("note:{}", note.id),
+            label,
+            true,
+            None::<&str>,
+        )?);
+    }
+
+    let more_item = if notes.len() > MAX_TRAY_NOTES {
+        Some(MenuItem::with_id(
+            app,
+            "more",
+            format!("…另有 {} 张", notes.len() - MAX_TRAY_NOTES),
+            false,
+            None::<&str>,
+        )?)
+    } else {
+        None
+    };
+
+    let separator = PredefinedMenuItem::separator(app)?;
     let new_item = MenuItem::with_id(app, "new", "新建便签", true, None::<&str>)?;
     let show_item = MenuItem::with_id(app, "show_all", "显示全部便签", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, "hide_all", "隐藏全部便签", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[&new_item, &show_item, &hide_item, &quit_item],
-    )?;
+
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
+    if !note_items.is_empty() {
+        for item in &note_items {
+            items.push(item);
+        }
+        if let Some(more) = &more_item {
+            items.push(more);
+        }
+        items.push(&separator);
+    }
+    items.push(&new_item);
+    items.push(&show_item);
+    items.push(&hide_item);
+    items.push(&quit_item);
+
+    Menu::with_items(app, &items)
+}
+
+/// 刷新托盘菜单（新建 / 改名 / 删除 / 折叠后都要调）。
+///
+/// 菜单构建内部会 `run_on_main_thread` 并阻塞等结果，如果当前已经在主线程
+/// （同步 command / 菜单回调）会死锁，所以统一丢到异步运行时里执行。
+fn schedule_tray_refresh(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let menu = match build_tray_menu(&app) {
+            Ok(menu) => menu,
+            Err(err) => {
+                eprintln!("[tray] 构建菜单失败：{err}");
+                return;
+            }
+        };
+        // 新菜单先存进 AppState，保证托盘切换期间对象一直存活
+        if let Ok(mut slot) = state.tray_menu.lock() {
+            *slot = Some(menu.clone());
+        }
+        if let Some(tray) = app.tray_by_id("main-tray") {
+            if let Err(err) = tray.set_menu(Some(menu)) {
+                eprintln!("[tray] 刷新菜单失败：{err}");
+            }
+        }
+    });
+}
+
+/// 托盘点击某张便签：已有窗口直接 show + focus；窗口还不存在（启动时隐藏的那张）就按需重建
+fn show_note_by_id(app: &AppHandle, id: &str) {
+    if let Some(window) = app.get_webview_window(&note_label(id)) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_skip_taskbar(true);
+        let _ = window.set_focus();
+        if let Some(state) = app.try_state::<AppState>() {
+            let id = id.to_string();
+            let _ = state.update(|s| {
+                if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+                    note.visible = true;
+                }
+            });
+        }
+        return;
+    }
+
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let note = state
+        .read(|s| s.notes.iter().find(|n| n.id == id).cloned())
+        .ok()
+        .flatten();
+    let Some(note) = note else {
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = create_note_window(&app, &note, true) {
+            eprintln!("[tray] 恢复便签窗口失败：{err}");
+        }
+    });
+}
+
+fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let handle = app.handle().clone();
+    let menu = build_tray_menu(&handle)?;
+    // 先保存一份菜单句柄，避免菜单对象在托盘接管前被释放
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut slot) = state.tray_menu.lock() {
+            *slot = Some(menu.clone());
+        }
+    }
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .tooltip("便签")
         .menu(&menu)
         // 左键单击唤回全部便签，右键才出菜单
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "new" => {
-                // 托盘菜单回调在主线程，而建窗口需要事件循环继续跑，必须挪到后台线程
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref().to_string();
+
+            // 便签列表项：id 形如 note:<uuid>
+            if let Some(note_id) = id.strip_prefix("note:") {
+                let note_id = note_id.to_string();
                 let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    match new_note_internal(&app) {
-                        Ok(note) => {
-                            if let Err(err) = create_note_window(&app, &note, true) {
-                                eprintln!("[tray] 新建便签窗口失败：{err}");
+                tauri::async_runtime::spawn(async move { show_note_by_id(&app, &note_id) });
+                return;
+            }
+
+            match id.as_str() {
+                "new" => {
+                    // 托盘菜单回调在主线程，而建窗口需要事件循环继续跑，必须挪到后台线程
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match new_note_internal(&app) {
+                            Ok(note) => {
+                                if let Err(err) = create_note_window(&app, &note, true) {
+                                    eprintln!("[tray] 新建便签窗口失败：{err}");
+                                }
+                                schedule_tray_refresh(&app);
                             }
+                            Err(err) => eprintln!("[tray] 新建便签失败：{err}"),
                         }
-                        Err(err) => eprintln!("[tray] 新建便签失败：{err}"),
-                    }
-                });
+                    });
+                }
+                "show_all" => {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move { show_all_notes(&app) });
+                }
+                "hide_all" => hide_all_notes(app),
+                "quit" => flush_and_exit(app),
+                _ => {}
             }
-            "show_all" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move { show_all_notes(&app) });
-            }
-            "hide_all" => hide_all_notes(app),
-            "quit" => flush_and_exit(app),
-            _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -777,6 +936,7 @@ pub fn run() {
                 store: Mutex::new(data),
                 path: store_path,
                 geom_gen: Mutex::new(HashMap::new()),
+                tray_menu: Mutex::new(None),
             });
 
             // 迁移后 / 首次运行立刻落盘：迁移幂等靠这一步把 v2 写回，下次不再迁移
