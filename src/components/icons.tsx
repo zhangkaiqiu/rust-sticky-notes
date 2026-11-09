@@ -70,6 +70,22 @@ export function DeleteIcon({ className = base }: IconProps) {
   );
 }
 
+export function ChevronIcon({ className = base }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M6 14.5 12 8.5l6 6" />
+    </svg>
+  );
+}
+
 export function TrayIcon({ className = base }: IconProps) {
   return (
     <svg

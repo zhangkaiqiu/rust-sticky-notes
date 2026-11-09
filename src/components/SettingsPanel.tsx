@@ -1,5 +1,4 @@
 import type { CSSProperties } from "react";
-import { useState } from "react";
 import {
   FONT_SIZES,
   MAX_OPACITY,
@@ -23,6 +22,9 @@ type Props = {
   onDelete: () => void;
   onQuit: () => void;
   onClose: () => void;
+  /** 删除二次确认的展开状态：由 App 持有，右键菜单的「删除便签」也能直接展开它 */
+  confirmDelete: boolean;
+  onConfirmDeleteChange: (next: boolean) => void;
 };
 
 function Switch({ checked }: { checked: boolean }) {
@@ -132,9 +134,10 @@ export default function SettingsPanel({
   onDelete,
   onQuit,
   onClose,
+  confirmDelete,
+  onConfirmDeleteChange,
 }: Props) {
   const palette = PALETTES[style.color][style.theme];
-  const [confirmDelete, setConfirmDelete] = useState(false);
   // 便签本身可以很透，但设置面板必须保持可读，最低按 90% 不透明度显示
   const panelStyle = {
     "--note-panel-alpha": Math.max(style.opacity, 0.9).toFixed(2),
@@ -214,7 +217,8 @@ export default function SettingsPanel({
             type="range"
             min={Math.round(MIN_OPACITY * 100)}
             max={Math.round(MAX_OPACITY * 100)}
-            step={5}
+            // 1% 一跳（方向键同样按 step 走），百分比数字随 value 同步
+            step={1}
             value={Math.round(style.opacity * 100)}
             aria-label="便签透明度"
             onChange={(e) => onStyleChange({ opacity: Number(e.target.value) / 100 })}
@@ -257,7 +261,7 @@ export default function SettingsPanel({
             <div className="mt-1.5 flex justify-end gap-1.5">
               <button
                 type="button"
-                onClick={() => setConfirmDelete(false)}
+                onClick={() => onConfirmDeleteChange(false)}
                 className="note-muted note-hover-soft rounded-md px-2 py-[3px] text-[0.6875em] transition-colors"
               >
                 取消
@@ -274,7 +278,7 @@ export default function SettingsPanel({
         ) : (
           <button
             type="button"
-            onClick={() => setConfirmDelete(true)}
+            onClick={() => onConfirmDeleteChange(true)}
             className="note-danger note-hover-soft note-focus flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[0.75em] focus-visible:outline-none"
           >
             <TrashIcon className="h-[0.875em] w-[0.875em]" />

@@ -89,6 +89,9 @@ pub fn install<R: Runtime>(window: &WebviewWindow<R>, pinned: bool) {
 ///
 /// 调用顺序必须是"先 `window.set_always_on_top(pinned)`，再调本函数"，因为
 /// tao 取消置顶用的是 `HWND_NOTOPMOST`，会把窗口顶到普通层最前面。
+///
+/// **任何把窗口从置顶降下来的路径都必须走到这里**（`pinned == false` 时补一次
+/// `HWND_BOTTOM`），否则窗口会停留在前台应用之上，表现为"后台便签自己跳出来"。
 pub fn set_user_pinned<R: Runtime>(window: &WebviewWindow<R>, pinned: bool) {
     let Ok(hwnd) = window.hwnd() else {
         return;

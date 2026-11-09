@@ -26,6 +26,8 @@ export type Note = {
   fontSize: FontSize;
   opacity: number;
   pinned: boolean;
+  /** 折叠成条：只显示标题栏；bounds 始终是展开态几何 */
+  collapsed: boolean;
   visible: boolean;
   bounds: WindowGeometry | null;
 };

@@ -76,7 +76,7 @@ npm run tauri build -- --no-bundle
 产物：
 
 - 可执行文件：`src-tauri/target/release/rust-sticky-notes.exe`
-- 安装包（去掉 `--no-bundle` 时）：`src-tauri/target/release/bundle/nsis/Rust Sticky Notes_0.2.0_x64-setup.exe`
+- 安装包（去掉 `--no-bundle` 时）：`src-tauri/target/release/bundle/nsis/Rust Sticky Notes_0.3.0_x64-setup.exe`
 
 **必须走 Tauri CLI**：直接 `cargo build --release` 不会带上 `custom-protocol` 特性，
 打出来的 exe 会去连 `localhost:1420`，显示"无法访问此页面"。
@@ -100,18 +100,39 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
     正文、TODO、输入框按 em 等比缩放，不用 `transform: scale`
   - 主题：浅色 / 深色；深色下卡片底色走 `#2A2622` 一类的深色系，文字、边框、分隔线、
     滚动条、滑块全部跟随
-  - **透明度**：35%–100%（默认 97%，视觉与改造前一致），只作用于卡片底色和边框的 alpha，
+  - **透明度**：35%–100%（默认 97%，视觉与改造前一致），滑块与方向键均为 **1% 步进**，只作用于卡片底色和边框的 alpha，
     文字 / 图标 / 勾选态 alpha 不变；低于 60% 时补一圈极轻的内描边帮助辨认边界
   - 设置面板里的滑块拖动实时预览，停手 300ms 后落盘
 - **图钉**：置顶时图钉整体旋转 45° 并加深颜色（无外圈、无底色块），未置顶时竖直淡色、
-  hover 变深；每张便签的 `pinned` 状态独立保存
+  hover 变深；每张便签的 `pinned` 状态独立保存。切换置顶是**幂等**的：状态没变时不调用
+  `set_always_on_top`（重复调 `HWND_NOTOPMOST` 会把窗口顶到最前），取消置顶后一律补一次
+  `HWND_BOTTOM` 垫回"桌面之上、其它窗口之下"；唤回路径也只对需要显示的窗口 `show()`
 - 设置面板（便签内小浮层，不另开窗口）：配色 / 字号 / 主题 / 透明度 / 置顶 / 开机自启 /
   隐藏到托盘 / 删除此便签（二次确认）/ 退出应用 / 数据文件路径
-- 托盘：右键菜单「新建便签 / 显示全部便签 / 隐藏全部便签 / 退出」，左键唤回全部便签
+- 托盘：右键菜单顶部是**便签列表**（每张一行，点击唤回并聚焦；最多 20 张，超出显示「…另有 N 张」），
+  分隔线后是「新建便签 / 显示全部便签 / 隐藏全部便签 / 退出」，左键单击唤回全部便签
 - 窗口位置与大小：按便签保存；监听 `Moved` / `Resized`，同一窗口 400ms 静默后写盘；
   启动时恢复并夹回所在显示器工作区，显示器不存在则回主屏居中
 - 开机自启：设置面板开关直连 `tauri-plugin-autostart`，每次启动以系统真实状态为准回写 JSON
 - 关窗即隐藏（`CloseRequested` 里 `prevent_close` + `hide` + `visible = false`），进程常驻托盘
+- **单实例锁**：`tauri-plugin-single-instance`（在 `Builder` 上第一个注册）。第二次双击 exe 不再起第二套窗口，
+  而是把已有便签 `show()` + `set_focus()`（第一张获得焦点）；判定按应用 identifier，
+  因此**便携模式的两份拷贝同机运行时，第二份会被判定为"已有实例"**
+- **折叠成条**：标题栏最左侧的箭头一键折叠，窗口高度缩到 **48 逻辑像素**，只留标题栏
+  （标题 / 展开箭头 / 图钉 / 设置）；再点一次按保存的展开高度恢复。`bounds` 始终保存**展开态**
+  几何，折叠不会把 48px 写进 `bounds`；最小尺寸按状态动态设置（折叠 40 / 展开 260 逻辑像素），
+  不再用一个写死的 260 下限挡住折叠
+- **每日自动备份**：每天第一次落盘前把当前 `store.json` 复制成同目录 `store.YYYYMMDD.json`
+  （本地日期），只保留最近 7 份，更早的自动删除；便携模式下备份跟随 `store.json` 所在目录；
+  备份失败只记日志，不影响保存
+- **Ctrl + 滚轮调字号**：便签内按住 `Ctrl` 上滚变大、下滚变小，在「小 / 中 / 大」三档之间移动
+  （到顶 / 到底停住，不回绕）；变更走同一套 300ms 防抖落盘，卡片右下角浮出「字号：中」约 1 秒后淡出
+  （CSS 动画，不用 `alert`），设置面板里的字号档位同步高亮。`wheel` 用原生 **非 passive** 监听并
+  `preventDefault()`，避免 WebView2 把整页缩放掉
+- **右键菜单**：正文 / 标题输入框右键有「剪切 / 复制 / 粘贴 / 全选」+ 便签操作；卡片空白处右键
+  是「新建便签 / 折叠 / 设置 / 删除便签」。菜单是纯 HTML/CSS 实现（不用原生菜单），点外部 / Esc /
+  滚动即关闭，贴近窗口右 / 下边缘会自动翻转；剪贴板走 `tauri-plugin-clipboard-manager`，
+  粘贴用 `document.execCommand('insertText')` 落在光标处并保留撤销栈
 - **删除便签**：Rust 侧先从 `notes[]` 移除并落盘，再销毁窗口；删除最后一张后刷盘并退出应用
 - **并发写安全**：所有写操作都经过 Rust 侧单一的 `Mutex<Store>`，持锁完成"改内存 + 原子落盘"
   （临时文件 + `rename`），前端不直接写文件，两个窗口不会互相覆盖
@@ -143,6 +164,7 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
       "fontSize": "md",
       "opacity": 0.97,
       "pinned": false,
+      "collapsed": false,
       "visible": true,
       "bounds": { "x": 0, "y": 0, "width": 640, "height": 840 }
     }
@@ -155,6 +177,8 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 - `fontSize` 取 `sm | md | lg`；`color` 取 `cream | mint | rose | sky | sand | graphite`；
   `theme` 取 `light | dark`；`opacity` 会被 clamp 到 0.35–1
 - `bounds` 是**物理像素**；`visible: false` 的便签启动时不建窗口，托盘「显示全部」会重建
+- `collapsed: true` 只说明"窗口现在收成条"：`bounds` 里存的仍是**展开态**宽高，启动时按 `collapsed`
+  把窗口压到 48 逻辑像素，展开时再按 `bounds.height` 恢复
 
 **从 v1（单便签）迁移**：
 
@@ -164,6 +188,25 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
   `settings.alwaysOnTop` → `notes[0].pinned`；`settings.autostart` → 新 `settings.autostart`；
   若旧数据里已有 `style`（任务二版本）则继承，否则用默认奶油/浅色/中/97%
 - 迁移成功后立即按 v2 落盘，因此重复启动不会再走迁移分支（幂等），也不会重复备份
+
+## 每日自动备份
+
+所有写盘都经过 `store::save`，备份就挂在这一处：**每天第一次落盘前**检查同目录有没有当天的
+备份文件，没有就先把当前的 `store.json` 复制一份。
+
+| 项 | 规则 |
+| --- | --- |
+| 文件名 | `store.YYYYMMDD.json`（本地日期，例如 `store.20261109.json`） |
+| 位置 | 与 `store.json` 同目录（便携模式即 exe 同目录，不用 AppData / 当前工作目录） |
+| 频率 | 每天最多一份；当天已存在就跳过 |
+| 保留 | 最近 **7 份**，更早的自动删除（只认 `store.YYYYMMDD.json` 这种名字，不会碰 `store.v1.bak.json`） |
+| 失败 | 只打印 `[store] 每日备份失败（忽略...）`，绝不阻断保存主流程 |
+
+注意：
+
+- 备份的是"今天第一次写盘**之前**"的内容，也就是昨天最后一次的状态——这才是误删 / 改坏时想找回的东西；
+- 备份文件不参与启动读取，恢复时手动把它改回 `store.json` 再启动即可；
+- 首次运行还没有 `store.json` 时不会产生备份。
 
 ## 便携模式
 
@@ -186,18 +229,50 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 - 便携目录必须可写（放在 `Program Files` 之类只读目录会写盘失败）；
 - exe 和 `store.json` 要一起搬走；只搬 exe 会得到一份全新的空便签；
 - 便携模式下开机自启注册的仍是**当前 exe 的绝对路径**：exe 被移动或改名后自启会失效，需要重新开关一次；
-- 便携数据和 AppData 数据完全独立，切换模式前建议先备份 `store.json`。
+- 便携数据和 AppData 数据完全独立，切换模式前建议先备份 `store.json`；
+- 单实例锁按应用 identifier 判定（不是按 exe 路径），所以**便携模式的两份拷贝同机运行**时，
+  第二份会被当成"已有实例"直接退出，并把第一份的便签唤到前台——想在两台机上各跑一份只能放不同机器
+
+## 右键菜单
+
+无边框窗口没有系统右键菜单，这里补了一套**中文自定义菜单**（纯 HTML/CSS，不用原生菜单弹窗，
+避免透明窗口里的坐标换算和裁切问题）。
+
+| 右键位置 | 菜单项 |
+| --- | --- |
+| 正文输入框 / 标题输入框 | 剪切 · 复制 · 粘贴 · 全选 · 分隔 · 新建便签 · 折叠成条 · 设置 · 删除便签 |
+| 卡片空白处 | 新建便签 · 折叠成条 · 设置 · 删除便签 |
+
+实现要点：
+
+- **剪贴板**用 `@tauri-apps/plugin-clipboard-manager`（`readText` / `writeText`），
+  `capabilities/default.json` 已放行 `clipboard-manager:allow-read-text` / `allow-write-text`；
+- **粘贴落在光标处**：右键瞬间记录 `selectionStart/End`，点菜单后重新聚焦并把选区放回去，
+  再用 `document.execCommand("insertText", false, text)` 插入——走浏览器编辑命令，**Ctrl+Z 撤销栈保持可用**；
+  若该命令不可用，退化为"原生 value setter + 派发 input 事件"（会丢撤销栈，仅作兜底）；
+- 剪切同样是"插件写剪贴板 + `execCommand('delete')` 删除选区"；
+- 菜单用 `position: fixed` + 鼠标坐标定位，`useLayoutEffect` 量完实际尺寸后，贴近右 / 下边缘自动翻转；
+- 点外部、按 `Esc`、滚动（捕获阶段）、窗口失焦 / 尺寸变化都会关闭；`Esc` 在捕获阶段拦下，
+  不会顺带关掉设置面板；
+- 删除便签复用设置面板里的**二次确认**（右键"删除便签"会打开面板并直接进入确认态）。
 
 ## 托盘菜单
 
+右键托盘图标弹出的菜单顶部是**便签列表**：每张便签一行，显示它的标题（默认标题的显示为
+「便签 1」「便签 2」…），点击即 `show()` + `set_focus()` 把那张便签唤到前台；选中的便签若窗口
+还不存在（启动时是隐藏状态）会按需重建。列表最多列 20 张，超出的显示「…另有 N 张」。
+
 | 菜单项 | 行为 |
 | --- | --- |
+| 便签列表（每张一行） | 显示并聚焦对应便签窗口 |
+| …另有 N 张 | 超出 20 张时的占位（不可点击） |
 | 新建便签 | 用 `defaultStyle` 建一张新便签（层叠偏移、夹回可见区域）并聚焦 |
 | 显示全部便签 | `unminimize` + `show` 全部窗口；被隐藏的便签会重新创建窗口，并把 `visible` 置回 true |
 | 隐藏全部便签 | 隐藏全部窗口，`visible` 置 false（重启后不自动出现） |
 | 退出 | 先 flush 全部便签状态，再退出进程 |
 
-左键单击托盘图标等同「显示全部便签」。
+菜单在**新建 / 改名 / 删除 / 折叠**后通过 `TrayIcon::set_menu` 重建；菜单对象由托盘和
+`AppState` 各持一份，不会因为临时值被释放而变空。左键单击托盘图标等同「显示全部便签」。
 
 ## 已验证（本机实测，2026-11-09）
 
@@ -237,6 +312,19 @@ Node 24.21.0、WebView2 157、3840×2160 @200% DPI。
 - 便携模式：在 `target/release` 放 `portable.txt`、故意从 `%TEMP%` 作为工作目录启动，
   `store.json` 仍生成在 exe 同目录（内容从 AppData 复制，1 条便签）；便携模式里的编辑只写 exe 目录那份；
   删掉 `portable.txt` 重启回到 AppData 数据，exe 目录那份哈希不变
+
+### 0.3.0 快速冒烟（release exe + 临时 portable 目录，200% DPI）
+
+- **折叠**：点标题栏箭头，窗口物理高度 840 → 96（= 48 逻辑像素），`store.json` 的
+  `collapsed: true`、`bounds.height` 仍为 840；再点恢复 840
+- **右键菜单**：正文右键弹出「剪切 / 复制 / 粘贴 / 全选 / 新建便签 / 折叠成条 / 设置… / 删除便签」，
+  无选区时剪切 / 复制置灰；点「粘贴」把系统剪贴板内容插到光标处（`execCommand('insertText')`）
+- **Ctrl + 滚轮**：上滚 `fontSize` 由 `md` → `lg`（到顶停住），300ms 防抖后落盘，卡片右下角浮出
+  「字号：中」轻提示；下滚回到 `md`
+- **新建便签**：右键菜单「新建便签」后 `notes` 变为 2 条，两个窗口各自独立
+- **单实例**：再启动一份 exe，新进程立即退出，仍只有 1 个实例、便签数不变
+- **每日备份**：当天首次写盘生成 `store.20261109.json`；预置 9 份旧备份后再落盘，只保留最近 7 份
+  （最旧的 3 份被删除）
 
 ## 启动速度怎么测
 
@@ -358,10 +446,14 @@ src-tauri\target\release\rust-sticky-notes.exe
 ## 下一步
 
 1. 全局快捷键（`tauri-plugin-global-shortcut`，例如 `Ctrl+Alt+N` 唤回）
-2. 窗口贴边吸附、记住每块显示器上的位置（存 logical 坐标 + DPI）
-3. 设置面板里提供"把当前外观设为新便签默认"
-4. 自动保存提示细化（脏标记、退出前 flush 的可见反馈）
-5. 监听 `TaskbarCreated` 后自动重绑 Progman，修复 explorer 重启导致的 Win+D 失效
+2. TODO 提醒（到点提醒 / 托盘气泡）
+3. 全文搜索（跨便签搜标题与正文）
+4. Markdown 渲染
+5. 窗口贴边吸附、记住每块显示器上的位置（存 logical 坐标 + DPI）
+6. 自动更新（`tauri-plugin-updater`）
+
+（另外留待下一阶段：监听 `TaskbarCreated` 后自动重绑 Progman，修复 explorer 重启导致的 Win+D 失效；
+设置面板里提供"把当前外观设为新便签默认"。）
 
 ## 许可证
 

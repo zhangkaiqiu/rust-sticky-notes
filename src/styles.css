@@ -233,6 +233,31 @@
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------- 轻提示（Ctrl+滚轮调字号） */
+
+@keyframes note-toast-in-out {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  12% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+.note-toast {
+  animation: note-toast-in-out 1.3s ease-out forwards;
+}
+
 /* ---------------------------------------------------------------- 滚动条 */
 
 ::-webkit-scrollbar {

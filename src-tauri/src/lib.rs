@@ -15,11 +15,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent, State, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
+    AppHandle, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent, State,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 
@@ -28,11 +28,24 @@ use store::{normalize_title, Note, NoteStyle, Store, TodoItem, WindowGeometry};
 /// 便签窗口 label 前缀；完整 label 为 `note-<uuid>`
 const NOTE_LABEL_PREFIX: &str = "note-";
 
+/// 折叠态窗口高度（逻辑像素）：只够放一行标题栏
+const COLLAPSED_HEIGHT: f64 = 48.0;
+/// 折叠态允许的最小高度（逻辑像素）：比 48 略低，留一点系统边框误差
+const MIN_COLLAPSED_HEIGHT: f64 = 40.0;
+/// 展开态的尺寸下限（逻辑像素）；折叠时必须先把这个下限降下来，否则窗口会被顶回 260
+const MIN_EXPANDED_WIDTH: f64 = 240.0;
+const MIN_EXPANDED_HEIGHT: f64 = 260.0;
+/// 没有历史展开高度时的兜底高度（逻辑像素）
+const DEFAULT_EXPANDED_HEIGHT: f64 = 420.0;
+
 pub struct AppState {
     store: Mutex<Store>,
     path: std::path::PathBuf,
     /// 每个窗口几何变化的代次，用来做「安静后才能落盘」的 debounce
     geom_gen: Mutex<HashMap<String, u64>>,
+    /// 当前托盘菜单的句柄。菜单对象必须一直存活（Windows 托盘仍引用它），
+    /// 不能构建完当临时值用完就丢；刷新时整体替换。
+    tray_menu: Mutex<Option<Menu<tauri::Wry>>>,
 }
 
 impl AppState {
@@ -181,6 +194,7 @@ fn set_note_style(
 
 #[tauri::command]
 fn set_note_title(
+    app: AppHandle,
     window: Window,
     state: State<'_, AppState>,
     title: String,
@@ -195,6 +209,8 @@ fn set_note_title(
             note.title = applied;
         }
     })?;
+    // 托盘菜单里的便签名要跟着改
+    schedule_tray_refresh(&app);
     Ok(normalized)
 }
 
@@ -205,16 +221,27 @@ fn set_note_pinned(
     state: State<'_, AppState>,
     pinned: bool,
 ) -> Result<(), String> {
+    let id = require_note_id(&window)?;
+    // 幂等：值没变就什么都不做。
+    // 这是运行时唯一的置顶入口，重复调 tao 的 set_always_on_top(false) 会走
+    // SetWindowPos(HWND_NOTOPMOST)，副作用是把窗口顶到普通层最前面（见 win_desktop_pin
+    // 顶部注释），表现就是后台便签突然盖住前台应用。所以必须先比对再动手。
+    let current = state.read(|s| s.notes.iter().find(|n| n.id == id).map(|n| n.pinned))?;
+    if current == Some(pinned) {
+        return Ok(());
+    }
+
     let label = window.label().to_string();
     if let Some(webview) = app.get_webview_window(&label) {
         webview
             .set_always_on_top(pinned)
             .map_err(|e| format!("设置置顶失败：{e}"))?;
-        // 取消置顶后要把窗口重新垫回"桌面之上、其它窗口之下"
+        // 取消置顶后必须把窗口重新垫回"桌面之上、其它窗口之下"：
+        // HWND_NOTOPMOST 会把它留在普通层最前面，不补这一下就会飘在前台应用之上
         #[cfg(windows)]
         win_desktop_pin::set_user_pinned(&webview, pinned);
     }
-    let id = require_note_id(&window)?;
+
     state.update(move |s| {
         if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
             note.pinned = pinned;
@@ -222,12 +249,74 @@ fn set_note_pinned(
     })
 }
 
+/// 折叠 / 展开当前便签。
+///
+/// 关键约束：`bounds` 永远保存**展开态**几何。
+/// - 折叠：先把窗口此刻的展开几何抓进 bounds，再把窗口压到 48 逻辑像素高；
+/// - 展开：按 bounds 里存的展开高度恢复（宽度沿用当前宽度）。
 #[tauri::command]
-async fn create_note(app: AppHandle) -> Result<String, String> {
-    // 必须是 async：同步命令跑在主线程，而建窗口要等事件循环把 WebView2 创建完，
+fn set_note_collapsed(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, AppState>,
+    collapsed: bool,
+) -> Result<bool, String> {
+    let id = require_note_id(&window)?;
+    let label = window.label().to_string();
+    let webview = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "便签窗口不存在".to_string())?;
+
+    let (current, stored_bounds) = state.read(|s| {
+        s.notes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| (n.collapsed, n.bounds.clone()))
+            .unwrap_or((false, None))
+    })?;
+    if current == collapsed {
+        return Ok(collapsed);
+    }
+
+    let mut bounds = stored_bounds.unwrap_or_default();
+    if collapsed {
+        // 以窗口此刻的真实几何作为「展开态」保存
+        if let (Ok(position), Ok(size)) = (webview.outer_position(), webview.outer_size()) {
+            if size.width >= 200 && size.height >= 100 {
+                bounds = WindowGeometry {
+                    x: position.x,
+                    y: position.y,
+                    width: size.width,
+                    height: size.height,
+                };
+            }
+        }
+    }
+
+    let persisted = bounds.clone();
+    state.update(move |s| {
+        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+            note.collapsed = collapsed;
+            if persisted.width > 0 && persisted.height > 0 {
+                note.bounds = Some(persisted);
+            }
+        }
+    })?;
+
+    apply_collapse_size(&webview, collapsed, Some(bounds.height))
+        .map_err(|e| format!("调整窗口尺寸失败：{e}"))?;
+
+    schedule_tray_refresh(&app);
+    Ok(collapsed)
+}
+
+#[tauri::command]
+async fn create_note(app: AppHandle) -> Result<String, String> {    // 必须是 async：同步命令跑在主线程，而建窗口要等事件循环把 WebView2 创建完，
     // 主线程一阻塞就会死锁（表现为窗口建出来但是 about:blank）。
     let note = new_note_internal(&app)?;
     create_note_window(&app, &note, true).map_err(|e| format!("创建便签窗口失败：{e}"))?;
+    // 托盘菜单补上这张新便签
+    schedule_tray_refresh(&app);
     Ok(note.id)
 }
 
@@ -243,6 +332,9 @@ fn delete_note(app: AppHandle, window: Window, state: State<'_, AppState>) -> Re
     if let Some(webview) = app.get_webview_window(&label) {
         let _ = webview.destroy();
     }
+
+    // 被删除的便签要从托盘列表里消失
+    schedule_tray_refresh(&app);
 
     if remaining == 0 {
         // 最后一张便签被删除：刷盘后退出，避免留下一个没有任何便签的托盘进程
@@ -363,7 +455,9 @@ fn create_note_window(
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title(note.title.clone())
         .inner_size(320.0, 420.0)
-        .min_inner_size(240.0, 260.0)
+        // 最小高度先按折叠态给（40），展开态的 260 在 restore_bounds 之后按状态再设，
+        // 否则 260 的下限会把折叠窗口顶回去。
+        .min_inner_size(MIN_EXPANDED_WIDTH, MIN_COLLAPSED_HEIGHT)
         .decorations(false)
         .transparent(true)
         .skip_taskbar(true)
@@ -375,6 +469,17 @@ fn create_note_window(
         .build()?;
 
     restore_bounds(&window, note.bounds.as_ref());
+    // 折叠态启动：永远存展开几何，只把窗口实际高度压到 48
+    if note.collapsed {
+        if let Err(err) = apply_collapse_size(&window, true, note.bounds.as_ref().map(|b| b.height)) {
+            eprintln!("[window] 应用折叠尺寸失败：{err}");
+        }
+    } else {
+        let _ = window.set_min_size(Some(LogicalSize::new(
+            MIN_EXPANDED_WIDTH,
+            MIN_EXPANDED_HEIGHT,
+        )));
+    }
     let _ = window.show();
     // 窗口是 visible:false 创建后再 show 的，Windows 上有一定概率把任务栏按钮带回来，
     // 这里显式再删一次（底层是 ITaskbarList::DeleteTab）
@@ -418,6 +523,39 @@ fn restore_bounds(window: &WebviewWindow, bounds: Option<&WindowGeometry>) {
 
     let (x, y) = clamp_to_area(area, geo.x, geo.y, geo.width, geo.height);
     let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+/// 按折叠状态设置窗口尺寸与最小尺寸限制。
+///
+/// 折叠时必须**先**把最小高度降到 40，再缩窗口——否则 260 的下限会把它顶回去；
+/// 展开时反过来：先恢复尺寸再抬下限。折叠只改窗口，不动 `bounds`。
+fn apply_collapse_size(
+    window: &WebviewWindow,
+    collapsed: bool,
+    expanded_height: Option<u32>,
+) -> tauri::Result<()> {
+    let scale = window.scale_factor()?;
+    let current = window.inner_size()?;
+    let width_logical = (current.width as f64 / scale).max(MIN_EXPANDED_WIDTH);
+
+    if collapsed {
+        window.set_min_size(Some(LogicalSize::new(
+            MIN_EXPANDED_WIDTH,
+            MIN_COLLAPSED_HEIGHT,
+        )))?;
+        window.set_size(LogicalSize::new(width_logical, COLLAPSED_HEIGHT))?;
+    } else {
+        let height_logical = expanded_height
+            .map(|h| h as f64 / scale)
+            .unwrap_or(DEFAULT_EXPANDED_HEIGHT)
+            .max(MIN_EXPANDED_HEIGHT);
+        window.set_size(LogicalSize::new(width_logical, height_logical))?;
+        window.set_min_size(Some(LogicalSize::new(
+            MIN_EXPANDED_WIDTH,
+            MIN_EXPANDED_HEIGHT,
+        )))?;
+    }
+    Ok(())
 }
 
 fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
@@ -491,6 +629,10 @@ fn schedule_geometry_persist(app: &AppHandle, label: &str) {
 }
 
 /// 从窗口读当前几何（物理像素）写进该便签的 bounds
+/// 从窗口读当前几何（物理像素）写进该便签的 bounds。
+///
+/// 折叠态特殊处理：窗口高度是 48 逻辑像素，但 `bounds` 必须保留展开态高度，
+/// 所以折叠时只更新位置和宽度，高度沿用已保存的展开高度。
 fn capture_geometry(app: &AppHandle, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
         return;
@@ -501,21 +643,42 @@ fn capture_geometry(app: &AppHandle, label: &str) {
     let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return;
     };
-    // 最小化 / 隐藏时可能拿到 0，丢弃这次结果
-    if size.width < 100 || size.height < 100 {
-        return;
-    }
     let Some(id) = note_id_from_label(label) else {
         return;
     };
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
+    let (collapsed, saved_height) = state
+        .read(|s| {
+            s.notes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| {
+                    (
+                        n.collapsed,
+                        n.bounds.as_ref().map(|b| b.height).unwrap_or(0),
+                    )
+                })
+                .unwrap_or((false, 0))
+        })
+        .unwrap_or((false, 0));
+
+    // 最小化 / 隐藏时可能拿到 0，丢弃这次结果；折叠态高度本来就只有 ~48，跳过高度下限检查
+    if size.width < 100 || (!collapsed && size.height < 100) {
+        return;
+    }
+
+    let height = if collapsed {
+        saved_height.max(200)
+    } else {
+        size.height
+    };
     let geometry = WindowGeometry {
         x: position.x,
         y: position.y,
         width: size.width,
-        height: size.height,
+        height,
     };
     let _ = state.update(move |s| {
         if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
@@ -526,6 +689,63 @@ fn capture_geometry(app: &AppHandle, label: &str) {
 
 // ---------------------------------------------------------------- 托盘
 
+/// 单实例锁回调：第二次双击 exe 时唤回已有便签。
+/// 只处理「已经存在」的窗口——这里不能建窗口（回调不在主线程，WebView2 必须主线程创建），
+/// 被隐藏到托盘的便签用托盘「显示全部便签」来恢复即可。
+/// 只在「确实需要」时 show / unminimize。
+///
+/// 对已经可见的窗口调 `show()` 会重新激活它、把它抬到最前——这是"后台便签自己跳到前台"
+/// 的一大来源。所有唤回路径统一走这里，已可见的窗口不会被重新抬起。
+/// 返回是否真的显示过（被隐藏 / 最小化的窗口）。
+fn ensure_window_visible(window: &WebviewWindow) -> bool {
+    let mut changed = false;
+    if window.is_minimized().unwrap_or(false) {
+        let _ = window.unminimize();
+        changed = true;
+    }
+    if !window.is_visible().unwrap_or(true) {
+        let _ = window.show();
+        // 窗口是 visible:false 创建后再 show 的，Windows 上有一定概率把任务栏按钮带回来
+        let _ = window.set_skip_taskbar(true);
+        changed = true;
+    }
+    changed
+}
+
+fn focus_existing_notes(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let notes = state.read(|s| s.notes.clone()).unwrap_or_default();
+    let mut first = None;
+    let mut shown = Vec::new();
+
+    for note in &notes {
+        if let Some(window) = app.get_webview_window(&note_label(&note.id)) {
+            ensure_window_visible(&window);
+            if first.is_none() {
+                first = Some(window);
+            }
+            shown.push(note.id.clone());
+        }
+    }
+
+    if !shown.is_empty() {
+        let _ = state.update(|s| {
+            for note in &mut s.notes {
+                if shown.contains(&note.id) {
+                    note.visible = true;
+                }
+            }
+        });
+    }
+
+    // 只把第一张便签唤到焦点，其余窗口保持原层级，避免整排便签一起跳到前台
+    if let Some(window) = first {
+        let _ = window.set_focus();
+    }
+}
+
 fn show_all_notes(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -535,9 +755,8 @@ fn show_all_notes(app: &AppHandle) {
 
     for note in &notes {
         if let Some(window) = app.get_webview_window(&note_label(&note.id)) {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_skip_taskbar(true);
+            // 已可见的窗口不重复 show，避免把整排便签抬到前台应用之上
+            ensure_window_visible(&window);
             last = Some(window);
         } else {
             match create_note_window(app, note, false) {
@@ -582,43 +801,190 @@ fn flush_and_exit(app: &AppHandle) {
     app.exit(0);
 }
 
-fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+/// 托盘菜单里最多列出的便签数，超出的用「…另有 N 张」占位
+const MAX_TRAY_NOTES: usize = 20;
+
+/// 托盘里的便签显示名：默认标题（空 / 「便签」）补上序号，避免一堆同名项
+fn tray_note_title(note: &Note, index: usize) -> String {
+    let title = note.title.trim();
+    if title.is_empty() || title == "便签" {
+        format!("便签 {}", index + 1)
+    } else {
+        title.to_string()
+    }
+}
+
+/// 按当前便签列表构建托盘菜单：便签项（最多 20 条）→ 分隔线 → 原有动作。
+/// 返回的 Menu 由调用方保存（托盘 + AppState 各持一份），不要当临时值丢掉。
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let notes = app
+        .try_state::<AppState>()
+        .and_then(|state| state.read(|s| s.notes.clone()).ok())
+        .unwrap_or_default();
+
+    // 便签项要先全部创建完，下面才能安全地借用它们拼 items
+    let mut note_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
+    for (index, note) in notes.iter().take(MAX_TRAY_NOTES).enumerate() {
+        let label = tray_note_title(note, index);
+        note_items.push(MenuItem::with_id(
+            app,
+            format!("note:{}", note.id),
+            label,
+            true,
+            None::<&str>,
+        )?);
+    }
+
+    let more_item = if notes.len() > MAX_TRAY_NOTES {
+        Some(MenuItem::with_id(
+            app,
+            "more",
+            format!("…另有 {} 张", notes.len() - MAX_TRAY_NOTES),
+            false,
+            None::<&str>,
+        )?)
+    } else {
+        None
+    };
+
+    let separator = PredefinedMenuItem::separator(app)?;
     let new_item = MenuItem::with_id(app, "new", "新建便签", true, None::<&str>)?;
     let show_item = MenuItem::with_id(app, "show_all", "显示全部便签", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, "hide_all", "隐藏全部便签", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[&new_item, &show_item, &hide_item, &quit_item],
-    )?;
+
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
+    if !note_items.is_empty() {
+        for item in &note_items {
+            items.push(item);
+        }
+        if let Some(more) = &more_item {
+            items.push(more);
+        }
+        items.push(&separator);
+    }
+    items.push(&new_item);
+    items.push(&show_item);
+    items.push(&hide_item);
+    items.push(&quit_item);
+
+    Menu::with_items(app, &items)
+}
+
+/// 刷新托盘菜单（新建 / 改名 / 删除 / 折叠后都要调）。
+///
+/// 菜单构建内部会 `run_on_main_thread` 并阻塞等结果，如果当前已经在主线程
+/// （同步 command / 菜单回调）会死锁，所以统一丢到异步运行时里执行。
+fn schedule_tray_refresh(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let menu = match build_tray_menu(&app) {
+            Ok(menu) => menu,
+            Err(err) => {
+                eprintln!("[tray] 构建菜单失败：{err}");
+                return;
+            }
+        };
+        // 新菜单先存进 AppState，保证托盘切换期间对象一直存活
+        if let Ok(mut slot) = state.tray_menu.lock() {
+            *slot = Some(menu.clone());
+        }
+        if let Some(tray) = app.tray_by_id("main-tray") {
+            if let Err(err) = tray.set_menu(Some(menu)) {
+                eprintln!("[tray] 刷新菜单失败：{err}");
+            }
+        }
+    });
+}
+
+/// 托盘点击某张便签：已有窗口直接 show + focus；窗口还不存在（启动时隐藏的那张）就按需重建
+fn show_note_by_id(app: &AppHandle, id: &str) {
+    if let Some(window) = app.get_webview_window(&note_label(id)) {
+        // 只处理这一张：已可见的窗口不再 show（避免抬起其它便签），直接聚焦即可
+        ensure_window_visible(&window);
+        let _ = window.set_focus();
+        if let Some(state) = app.try_state::<AppState>() {
+            let id = id.to_string();
+            let _ = state.update(|s| {
+                if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+                    note.visible = true;
+                }
+            });
+        }
+        return;
+    }
+
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let note = state
+        .read(|s| s.notes.iter().find(|n| n.id == id).cloned())
+        .ok()
+        .flatten();
+    let Some(note) = note else {
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = create_note_window(&app, &note, true) {
+            eprintln!("[tray] 恢复便签窗口失败：{err}");
+        }
+    });
+}
+
+fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let handle = app.handle().clone();
+    let menu = build_tray_menu(&handle)?;
+    // 先保存一份菜单句柄，避免菜单对象在托盘接管前被释放
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut slot) = state.tray_menu.lock() {
+            *slot = Some(menu.clone());
+        }
+    }
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .tooltip("便签")
         .menu(&menu)
         // 左键单击唤回全部便签，右键才出菜单
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "new" => {
-                // 托盘菜单回调在主线程，而建窗口需要事件循环继续跑，必须挪到后台线程
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref().to_string();
+
+            // 便签列表项：id 形如 note:<uuid>
+            if let Some(note_id) = id.strip_prefix("note:") {
+                let note_id = note_id.to_string();
                 let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    match new_note_internal(&app) {
-                        Ok(note) => {
-                            if let Err(err) = create_note_window(&app, &note, true) {
-                                eprintln!("[tray] 新建便签窗口失败：{err}");
+                tauri::async_runtime::spawn(async move { show_note_by_id(&app, &note_id) });
+                return;
+            }
+
+            match id.as_str() {
+                "new" => {
+                    // 托盘菜单回调在主线程，而建窗口需要事件循环继续跑，必须挪到后台线程
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match new_note_internal(&app) {
+                            Ok(note) => {
+                                if let Err(err) = create_note_window(&app, &note, true) {
+                                    eprintln!("[tray] 新建便签窗口失败：{err}");
+                                }
+                                schedule_tray_refresh(&app);
                             }
+                            Err(err) => eprintln!("[tray] 新建便签失败：{err}"),
                         }
-                        Err(err) => eprintln!("[tray] 新建便签失败：{err}"),
-                    }
-                });
+                    });
+                }
+                "show_all" => {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move { show_all_notes(&app) });
+                }
+                "hide_all" => hide_all_notes(app),
+                "quit" => flush_and_exit(app),
+                _ => {}
             }
-            "show_all" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move { show_all_notes(&app) });
-            }
-            "hide_all" => hide_all_notes(app),
-            "quit" => flush_and_exit(app),
-            _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -680,10 +1046,21 @@ fn resolve_data_dir(default_dir: &Path) -> (PathBuf, bool) {
 
 pub fn run() {
     tauri::Builder::default()
+        // 单实例锁必须是「第一个注册」的插件（插件自身的硬性要求）。
+        // 第二次双击 exe 时：新进程由插件直接退出，回调在已存在的实例里把便签唤回前台。
+        // 注意按应用 identifier 判定，所以便携模式的两份拷贝同机运行也只会有一份活着。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            let app = app.clone();
+            // 回调不保证在主线程，窗口操作统一挪回主线程执行
+            let _ = app.clone().run_on_main_thread(move || {
+                focus_existing_notes(&app);
+            });
+        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -729,6 +1106,7 @@ pub fn run() {
                 store: Mutex::new(data),
                 path: store_path,
                 geom_gen: Mutex::new(HashMap::new()),
+                tray_menu: Mutex::new(None),
             });
 
             // 迁移后 / 首次运行立刻落盘：迁移幂等靠这一步把 v2 写回，下次不再迁移
@@ -757,6 +1135,7 @@ pub fn run() {
             set_note_title,
             set_note_style,
             set_note_pinned,
+            set_note_collapsed,
             create_note,
             delete_note,
             set_autostart,

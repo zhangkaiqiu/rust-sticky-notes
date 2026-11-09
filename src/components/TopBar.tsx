@@ -1,14 +1,19 @@
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { useEffect, useRef, useState } from "react";
-import { GearIcon, PinIcon } from "./icons";
+import { ChevronIcon, GearIcon, PinIcon } from "./icons";
 
 type Props = {
   title: string;
   pinned: boolean;
+  collapsed: boolean;
   savedTick: number;
   settingsOpen: boolean;
   onTitleChange: (next: string) => void;
   onTogglePin: () => void;
+  onToggleCollapsed: () => void;
   onToggleSettings: () => void;
+  /** 标题输入框右键 → 打开自定义菜单（剪切 / 复制 / 粘贴 / 全选） */
+  onFieldContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
 };
 
 /** 与 Rust 侧 `store::MAX_TITLE_CHARS` 保持一致 */
@@ -19,11 +24,14 @@ const DEFAULT_TITLE = "便签";
 export default function TopBar({
   title,
   pinned,
+  collapsed,
   savedTick,
   settingsOpen,
   onTitleChange,
   onTogglePin,
+  onToggleCollapsed,
   onToggleSettings,
+  onFieldContextMenu,
 }: Props) {
   const [justSaved, setJustSaved] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -68,8 +76,27 @@ export default function TopBar({
   return (
     <div
       data-tauri-drag-region
-      className="flex h-9 shrink-0 select-none items-center gap-1 pl-3.5 pr-1.5"
+      className="flex h-9 shrink-0 select-none items-center gap-1 pl-1.5 pr-1.5"
     >
+      {/*
+        折叠 / 展开箭头：单独一个按钮，mousedown 阻止冒泡，
+        这样点它只切换折叠，不会误触标题栏的拖拽（旁边空白仍可拖动）。
+      */}
+      <button
+        type="button"
+        title={collapsed ? "展开便签" : "折叠成条"}
+        aria-expanded={!collapsed}
+        onClick={onToggleCollapsed}
+        onMouseDown={(e) => e.stopPropagation()}
+        className="note-icon-btn note-focus flex shrink-0 items-center justify-center rounded-full p-[5px] focus-visible:outline-none"
+      >
+        <ChevronIcon
+          className={`h-[0.875em] w-[0.875em] transition-transform duration-200 ${
+            collapsed ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+
       {editing ? (
         /*
           输入框不挂 data-tauri-drag-region，且 mousedown 阻止冒泡：
@@ -84,6 +111,7 @@ export default function TopBar({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={commit}
           onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={onFieldContextMenu}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === "Enter") {
@@ -112,13 +140,16 @@ export default function TopBar({
       {/* 剩余空白都可拖动：pointer-events-none 让事件落到父级拖动区 */}
       <div data-tauri-drag-region className="pointer-events-none h-full flex-1" />
 
-      <span
-        className={`note-faint mr-0.5 text-[0.625em] transition-opacity duration-300 ${
-          justSaved ? "opacity-100" : "opacity-0"
-        }`}
-      >
-        已保存
-      </span>
+      {/* 折叠成条时空间紧张，保存提示让位给标题（保存状态仍照常落盘） */}
+      {!collapsed && (
+        <span
+          className={`note-faint mr-0.5 text-[0.625em] transition-opacity duration-300 ${
+            justSaved ? "opacity-100" : "opacity-0"
+          }`}
+        >
+          已保存
+        </span>
+      )}
 
       {/*
         图钉只有两种视觉状态，不再画外圈 / 底色块：

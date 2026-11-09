@@ -16,6 +16,9 @@ export const api = {
   saveTitle: (title: string) => invoke<string>("set_note_title", { title }),
   saveStyle: (style: NoteStyle) => invoke<NoteStyle>("set_note_style", { style }),
   setPinned: (pinned: boolean) => invoke<void>("set_note_pinned", { pinned }),
+  /** 折叠 / 展开当前便签：只改窗口实际尺寸，bounds 里始终是展开态几何 */
+  setCollapsed: (collapsed: boolean) =>
+    invoke<boolean>("set_note_collapsed", { collapsed }),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   createNote: () => invoke<string>("create_note"),
   deleteNote: () => invoke<void>("delete_note"),
