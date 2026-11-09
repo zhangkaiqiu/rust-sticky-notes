@@ -1,0 +1,35 @@
+[package]
+name = "rust-sticky-notes"
+version = "0.1.0"
+description = "A lightweight Windows desktop sticky note"
+authors = ["rust-sticky-notes"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "rust_sticky_notes_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 抵抗 Win+D 需要直接调 Win32（owner 关系 + 窗口子类化）。
+# 版本固定 0.62 以复用 tauri 2.12 已经引入的同一份 windows crate，不额外增加编译量。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

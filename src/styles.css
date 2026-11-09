@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    overflow: hidden;
+    /* 关键：窗口本身是透明的，body 不能再涂底色 */
+    background: transparent;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 便签整体默认不选中文字，避免拖动时误选；输入区域单独放开 */
+  #root {
+    user-select: none;
+  }
+
+  textarea,
+  input {
+    user-select: text;
+  }
+}
+
+/* 细滚动条，贴合便签风格 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 100, 40, 0.22);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 100, 40, 0.38);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
