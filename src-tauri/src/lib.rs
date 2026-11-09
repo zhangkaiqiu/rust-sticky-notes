@@ -221,16 +221,27 @@ fn set_note_pinned(
     state: State<'_, AppState>,
     pinned: bool,
 ) -> Result<(), String> {
+    let id = require_note_id(&window)?;
+    // 幂等：值没变就什么都不做。
+    // 这是运行时唯一的置顶入口，重复调 tao 的 set_always_on_top(false) 会走
+    // SetWindowPos(HWND_NOTOPMOST)，副作用是把窗口顶到普通层最前面（见 win_desktop_pin
+    // 顶部注释），表现就是后台便签突然盖住前台应用。所以必须先比对再动手。
+    let current = state.read(|s| s.notes.iter().find(|n| n.id == id).map(|n| n.pinned))?;
+    if current == Some(pinned) {
+        return Ok(());
+    }
+
     let label = window.label().to_string();
     if let Some(webview) = app.get_webview_window(&label) {
         webview
             .set_always_on_top(pinned)
             .map_err(|e| format!("设置置顶失败：{e}"))?;
-        // 取消置顶后要把窗口重新垫回"桌面之上、其它窗口之下"
+        // 取消置顶后必须把窗口重新垫回"桌面之上、其它窗口之下"：
+        // HWND_NOTOPMOST 会把它留在普通层最前面，不补这一下就会飘在前台应用之上
         #[cfg(windows)]
         win_desktop_pin::set_user_pinned(&webview, pinned);
     }
-    let id = require_note_id(&window)?;
+
     state.update(move |s| {
         if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
             note.pinned = pinned;
@@ -681,6 +692,26 @@ fn capture_geometry(app: &AppHandle, label: &str) {
 /// 单实例锁回调：第二次双击 exe 时唤回已有便签。
 /// 只处理「已经存在」的窗口——这里不能建窗口（回调不在主线程，WebView2 必须主线程创建），
 /// 被隐藏到托盘的便签用托盘「显示全部便签」来恢复即可。
+/// 只在「确实需要」时 show / unminimize。
+///
+/// 对已经可见的窗口调 `show()` 会重新激活它、把它抬到最前——这是"后台便签自己跳到前台"
+/// 的一大来源。所有唤回路径统一走这里，已可见的窗口不会被重新抬起。
+/// 返回是否真的显示过（被隐藏 / 最小化的窗口）。
+fn ensure_window_visible(window: &WebviewWindow) -> bool {
+    let mut changed = false;
+    if window.is_minimized().unwrap_or(false) {
+        let _ = window.unminimize();
+        changed = true;
+    }
+    if !window.is_visible().unwrap_or(true) {
+        let _ = window.show();
+        // 窗口是 visible:false 创建后再 show 的，Windows 上有一定概率把任务栏按钮带回来
+        let _ = window.set_skip_taskbar(true);
+        changed = true;
+    }
+    changed
+}
+
 fn focus_existing_notes(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -691,9 +722,7 @@ fn focus_existing_notes(app: &AppHandle) {
 
     for note in &notes {
         if let Some(window) = app.get_webview_window(&note_label(&note.id)) {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_skip_taskbar(true);
+            ensure_window_visible(&window);
             if first.is_none() {
                 first = Some(window);
             }
@@ -711,6 +740,7 @@ fn focus_existing_notes(app: &AppHandle) {
         });
     }
 
+    // 只把第一张便签唤到焦点，其余窗口保持原层级，避免整排便签一起跳到前台
     if let Some(window) = first {
         let _ = window.set_focus();
     }
@@ -725,9 +755,8 @@ fn show_all_notes(app: &AppHandle) {
 
     for note in &notes {
         if let Some(window) = app.get_webview_window(&note_label(&note.id)) {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_skip_taskbar(true);
+            // 已可见的窗口不重复 show，避免把整排便签抬到前台应用之上
+            ensure_window_visible(&window);
             last = Some(window);
         } else {
             match create_note_window(app, note, false) {
@@ -874,9 +903,8 @@ fn schedule_tray_refresh(app: &AppHandle) {
 /// 托盘点击某张便签：已有窗口直接 show + focus；窗口还不存在（启动时隐藏的那张）就按需重建
 fn show_note_by_id(app: &AppHandle, id: &str) {
     if let Some(window) = app.get_webview_window(&note_label(id)) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_skip_taskbar(true);
+        // 只处理这一张：已可见的窗口不再 show（避免抬起其它便签），直接聚焦即可
+        ensure_window_visible(&window);
         let _ = window.set_focus();
         if let Some(state) = app.try_state::<AppState>() {
             let id = id.to_string();
