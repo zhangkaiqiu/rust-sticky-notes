@@ -106,6 +106,8 @@ pub struct WindowEntry {
     pub toolwindow: bool,
     pub owner_hwnd: isize,
     pub owner_class: String,
+    /// owner 的 owner 类名（影子模型下便签 owner 是 `Static` 影子，影子的 owner 才是 `Progman`）
+    pub owner_owner_class: String,
     pub class: String,
     pub title: String,
     pub visible: bool,
@@ -261,6 +263,7 @@ fn build_window_entry(
         toolwindow: ex & EX_TOOLWINDOW != 0,
         owner_hwnd: owner.0 as isize,
         owner_class: class_name(owner),
+        owner_owner_class: class_name(unsafe { GetWindow(owner, GW_OWNER) }.unwrap_or_default()),
         class: class_name(hwnd),
         title: window_title(hwnd),
         visible: unsafe { IsWindowVisible(hwnd).as_bool() },
@@ -467,31 +470,43 @@ fn check_pin_consistency(snapshot: &Snapshot) -> CheckItem {
     }
 }
 
-/// 2. owner 正确：owner 必须是 Progman（Win+D 抗性的前提）
+/// 2. owner 链正确：owner 必须是「影子窗口 → Progman」，或直接 Progman（影子建不出来时的退化）
+///
+/// 0.4.4 起每条便签挂**各自的**影子 owner（1×1 屏幕外 `Static`），目的是把 owner 组拆开：
+/// 同 owner 的窗口在 Windows 眼里是一组，激活任一张会把整组抬起来，兄弟窗口会闪一下。
 fn check_owner_progman(snapshot: &Snapshot) -> CheckItem {
     let mut bad = Vec::new();
+    let mut direct = 0;
+    let mut shadowed = 0;
 
     for window in &snapshot.windows {
-        if window.owner_class != "Progman" {
+        if window.owner_class == "Progman" {
+            direct += 1;
+        } else if window.owner_class == "Static" && window.owner_owner_class == "Progman" {
+            shadowed += 1;
+        } else {
             bad.push(format!(
-                "{} owner_hwnd={} owner_class=\"{}\"（期望 Progman）",
-                window.label, window.owner_hwnd, window.owner_class
+                "{} owner=\"{}\"（owner 的 owner=\"{}\"），期望 Progman 或 Static→Progman",
+                window.label, window.owner_class, window.owner_owner_class
             ));
         }
     }
 
     if !bad.is_empty() {
-        return fail("owner_progman", "owner 正确", bad.join("；"));
+        return fail("owner_progman", "owner 链正确", bad.join("；"));
     }
     CheckItem {
         id: "owner_progman",
-        name: "owner 正确",
+        name: "owner 链正确",
         status: if snapshot.windows.is_empty() {
             "skip"
         } else {
             "pass"
         },
-        detail: format!("{} 个便签窗口的 owner 均为 Progman", snapshot.windows.len()),
+        detail: format!(
+            "{} 个便签窗口：{shadowed} 个走影子 Static→Progman，{direct} 个直挂 Progman",
+            snapshot.windows.len()
+        ),
     }
 }
 

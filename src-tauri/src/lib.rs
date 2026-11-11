@@ -395,6 +395,9 @@ fn delete_note_via(app: &AppHandle, state: &AppState, id: &str) -> Result<(), St
     })?;
 
     if let Some(webview) = app.get_webview_window(&note_label(id)) {
+        // 先回收影子 owner，再销毁窗口（影子挂在便签的 HWND 属性上，销毁后就读不到了）
+        #[cfg(windows)]
+        win_desktop_pin::release(&webview);
         let _ = webview.destroy();
     }
 
@@ -606,15 +609,9 @@ fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
             schedule_geometry_persist(&app, &label);
         }
-        // 激活便签时 Windows 会把整个 owner 组（owner = Progman）抬到普通层最前面，
-        // 后台沉底的兄弟会跟着窜到前台应用之上。这不是我们的 SetWindowPos 干的，
-        // 只能事后把那些不该动的兄弟放回底部——只放它们，不碰被激活的这张。
-        WindowEvent::Focused(true) => {
-            #[cfg(windows)]
-            if let Some(win) = app.get_webview_window(&label) {
-                win_desktop_pin::settle_siblings(&win);
-            }
-        }
+        // 每条便签各自挂一个影子 owner（见 win_desktop_pin），所以激活不再牵连兄弟，
+        // 这里什么都不用做——0.4.3 之前在这里做全量重排/补垫，正是窗口闪一下的元凶。
+        WindowEvent::Focused(_) => {}
         WindowEvent::CloseRequested { api, .. } => {
             // 没有系统标题栏，这里只兜底：关窗 = 收进托盘
             api.prevent_close();
