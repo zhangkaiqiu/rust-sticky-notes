@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent, State,
@@ -142,23 +142,18 @@ fn clamp_to_area(
 #[serde(rename_all = "camelCase")]
 struct NoteState {
     note: Note,
-    autostart: bool,
     store_path: String,
 }
 
 #[tauri::command]
 fn get_note_state(window: Window, state: State<'_, AppState>) -> Result<NoteState, String> {
     let id = require_note_id(&window)?;
-    let (note, autostart) = state.read(|s| {
-        (
-            s.notes.iter().find(|n| n.id == id).cloned(),
-            s.settings.autostart,
-        )
+    let note = state.read(|s| {
+        s.notes.iter().find(|n| n.id == id).cloned()
     })?;
     let note = note.ok_or_else(|| format!("便签 {id} 不存在"))?;
     Ok(NoteState {
         note,
-        autostart,
         store_path: state.path.display().to_string(),
     })
 }
@@ -255,12 +250,13 @@ fn set_note_pinned(
 
 /// 切换置顶的**唯一**后端路径：UI 图钉、设置面板、`--set-pin` 全都走这里。
 ///
-/// 幂等：值没变、且实际层级已经对得上，就什么都不做。
-/// 这是运行时唯一的置顶入口，重复调 tao 的 `set_always_on_top(false)` 会走
-/// `SetWindowPos(HWND_NOTOPMOST)`，副作用是把窗口顶到普通层最前面（见 win_desktop_pin
-/// 顶部注释），表现就是后台便签突然盖住前台应用。所以必须先比对再动手。
+/// 幂等：值没变、且实际层级已经对得上，就什么都不做——省掉无谓的层级动作。
 /// 注意要同时比对"内存状态"和"真实 exstyle"：重启后可能出现两者不一致的情况，
 /// 此时不能因为值没变就直接返回，否则永远修不回来。
+///
+/// Windows 上**不调** tao 的 `set_always_on_top`：它走 `HWND_NOTOPMOST` 且不带
+/// `SWP_NOOWNERZORDER`，会顺手把同 owner 组的兄弟窗口一起拽起来。层级的实际改动由
+/// `win_desktop_pin::set_user_pinned`（= 改状态 → `reconcile()`）完成。
 fn apply_pinned(
     webview: &WebviewWindow,
     id: &str,
@@ -276,12 +272,10 @@ fn apply_pinned(
         return Ok(actual_now);
     }
 
+    #[cfg(not(windows))]
     webview
         .set_always_on_top(pinned)
         .map_err(|e| format!("设置置顶失败：{e}"))?;
-    // 取消置顶后必须把窗口重新垫回"桌面之上、其它窗口之下"：
-    // HWND_NOTOPMOST 会把它留在普通层最前面，不补这一下就会飘在前台应用之上。
-    // 同时把**其它**未置顶便签压回去：激活动作会把同 owner 组的兄弟窗口一起抬起来。
     #[cfg(windows)]
     let actual = win_desktop_pin::set_user_pinned(webview, pinned);
     #[cfg(not(windows))]
@@ -416,29 +410,6 @@ fn delete_note_via(app: &AppHandle, state: &AppState, id: &str) -> Result<(), St
 }
 
 #[tauri::command]
-fn set_autostart(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<bool, String> {
-    let manager = app.autolaunch();
-    if enabled {
-        manager
-            .enable()
-            .map_err(|e| format!("开启开机自启失败：{e}"))?;
-    } else {
-        manager
-            .disable()
-            .map_err(|e| format!("关闭开机自启失败：{e}"))?;
-    }
-
-    // 以系统真实状态为准回写
-    let actual = manager.is_enabled().unwrap_or(enabled);
-    state.update(|s| s.settings.autostart = actual)?;
-    Ok(actual)
-}
-
-#[tauri::command]
 fn hide_note(window: Window, state: State<'_, AppState>) -> Result<(), String> {
     let id = require_note_id(&window)?;
     let _ = window.hide();
@@ -447,12 +418,6 @@ fn hide_note(window: Window, state: State<'_, AppState>) -> Result<(), String> {
             note.visible = false;
         }
     })
-}
-
-#[tauri::command]
-fn quit_app(app: AppHandle, state: State<'_, AppState>) {
-    let _ = state.flush();
-    app.exit(0);
 }
 
 // ---------------------------------------------------------------- 新建 / 窗口
@@ -560,15 +525,15 @@ fn create_note_window(
 
     // 抵抗 Win+D：把桌面窗口设成便签的 owner，再把便签垫到桌面之上、其它窗口之下。
     // 顺序很重要：必须在 show 之后（窗口已可见才有 z 序可言），并且在 focus 之前
-    // （激活会把同 owner 组的兄弟窗口一起抬起来，见 win_desktop_pin 顶部 BUG 1 说明）。
+    // （激活会把同 owner 组的兄弟窗口一起抬起来，见 win_desktop_pin 顶部「历史坑位速查」）。
     #[cfg(windows)]
     win_desktop_pin::install(&window, note.pinned);
 
     if focus {
         let _ = window.set_focus();
-        // 激活之后同 owner 组的未置顶便签会被连带抬起，补一刀压回去
+        // 激活之后同 owner 组的未置顶便签会被连带抬起，重排一次把它们压回去
         #[cfg(windows)]
-        win_desktop_pin::park_siblings_after_activation(&window);
+        win_desktop_pin::note_activated(&window);
     }
 
     Ok(window)
@@ -648,11 +613,11 @@ fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
         }
         // 便签被激活（用户点它、或程序 focus）时，Windows 会把同一 owner 组
         // （owner = Progman）的其它便签一起抬到普通层最前面。这正是"点 A 的图钉，
-        // B 窜到前台应用之上"的直接原因，所以在激活之后把其它未置顶的便签压回去。
+        // B 窜到前台应用之上"的直接原因，所以激活之后统一重排一次层级。
         WindowEvent::Focused(true) => {
             #[cfg(windows)]
             if let Some(win) = app.get_webview_window(&label) {
-                win_desktop_pin::park_siblings_after_activation(&win);
+                win_desktop_pin::note_activated(&win);
             }
         }
         WindowEvent::CloseRequested { api, .. } => {
@@ -958,7 +923,7 @@ fn ensure_window_visible(window: &WebviewWindow) -> bool {
 
 /// 按 store 里的顺序取出当前所有便签窗口（`raise_notes` / `sink_all_notes` 的入参）。
 ///
-/// 顺序有意义：`raise_notes` 从后往前抬，所以数组第一张最终在最前面、也是被聚焦的那张。
+/// 顺序有意义：`raise_notes` 最后聚焦第一张，重排时同一段内也按这个顺序排前后。
 fn note_windows_in_store_order(app: &AppHandle) -> Vec<WebviewWindow> {
     let Some(state) = app.try_state::<AppState>() else {
         return Vec::new();
@@ -1005,13 +970,9 @@ fn focus_existing_notes(app: &AppHandle) {    let Some(state) = app.try_state::<
 
 /// 托盘左键 / `--raise-all` 的统一入口：把**全部**便签显式抬到前台应用之上。
 ///
-/// 0.4.1 修正（BUG B）：以前这里只对最后一个窗口 `set_focus()`，该窗口的
-/// `Focused(true)` 会触发 `park_siblings_behind`，把其它未置顶便签全部 `HWND_BOTTOM`
-/// ——结果就是"一张在前面、另一张被踩到底"，中间那一瞬的抬起-沉降是用户看到的"闪一下"。
-///
-/// 现在：`ensure_window_visible` 全部 → `raise_notes` 逐张标记 `Raised` 并抬到
-/// `HWND_TOP`（置顶的抬 `HWND_TOPMOST`）→ 更新 `visible` → 由 `raise_notes` 统一聚焦一次。
-/// 后续 `Focused(true)` 因为兄弟窗口已经是 `Raised` 而不会再被踩回去。
+/// 只对最后一张 `set_focus()`（早期版本只 focus 一个窗口，那个窗口的 `Focused(true)`
+/// 会把其它未置顶便签踩到底，用户看到"一张在前、另一张闪回去"）。现在所有窗口先被
+/// `raise_notes` 标记成 raised 并统一重排，随后的 `Focused(true)` 不会再把兄弟压回去。
 fn show_all_notes(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -1040,7 +1001,7 @@ fn show_all_notes(app: &AppHandle) {
 
     #[cfg(windows)]
     {
-        // 按 store 里的顺序传入（最后一张先抬，第一张最终在最前），焦点也落在第一张上
+        // 按 store 里的顺序传入：同一段内的前后由它决定，焦点落在第一张上
         let raised = win_desktop_pin::raise_notes(&windows);
         if raised == 0 {
             // 没有可用句柄时退化成老行为：至少别让用户觉得点击没反应
@@ -1138,10 +1099,25 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     };
 
     let separator = PredefinedMenuItem::separator(app)?;
+    let separator_global = PredefinedMenuItem::separator(app)?;
     let new_item = MenuItem::with_id(app, "new", "新建便签", true, None::<&str>)?;
     let show_item = MenuItem::with_id(app, "show_all", "显示全部便签", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, "hide_all", "隐藏全部便签", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    // 全局项只放托盘菜单：便签窗口的菜单里只出现"这张便签"的操作，
+    // 开机自启 / 退出应用这类"整个应用"的动作统一归托盘。
+    let autostart_enabled = app
+        .try_state::<AppState>()
+        .and_then(|state| state.read(|s| s.settings.autostart).ok())
+        .unwrap_or(false);
+    let autostart_item = CheckMenuItem::with_id(
+        app,
+        "toggle_autostart",
+        "开机自启",
+        true,
+        autostart_enabled,
+        None::<&str>,
+    )?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出应用", true, None::<&str>)?;
     // 调试入口：导出窗口状态（极少数场景才用，所以放在最底下、单独一条分隔线之后）
     let diag_separator = PredefinedMenuItem::separator(app)?;
     let diag_item = MenuItem::with_id(
@@ -1165,6 +1141,8 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     items.push(&new_item);
     items.push(&show_item);
     items.push(&hide_item);
+    items.push(&separator_global);
+    items.push(&autostart_item);
     items.push(&quit_item);
     items.push(&diag_separator);
     items.push(&diag_item);
@@ -1283,6 +1261,30 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                     tauri::async_runtime::spawn(async move { show_all_notes(&app) });
                 }
                 "hide_all" => hide_all_notes(app),
+                "toggle_autostart" => {
+                    // 托盘里的「开机自启」是全局项：状态以系统真实注册项为准，
+                    // 点一次切换一次，然后刷新菜单把勾回写正确。
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let manager = app.autolaunch();
+                        let enabled = manager.is_enabled().unwrap_or(false);
+                        let result = if enabled {
+                            manager.disable()
+                        } else {
+                            manager.enable()
+                        };
+                        match result {
+                            Ok(()) => {
+                                let actual = manager.is_enabled().unwrap_or(!enabled);
+                                if let Some(state) = app.try_state::<AppState>() {
+                                    let _ = state.update(|s| s.settings.autostart = actual);
+                                }
+                                schedule_tray_refresh(&app);
+                            }
+                            Err(err) => eprintln!("[tray] 切换开机自启失败：{err}"),
+                        }
+                    });
+                }
                 "quit" => flush_and_exit(app),
                 "diag_dump" => {
                     // 只读状态、几十毫秒就能跑完，直接在主线程做（托盘回调本来就在主线程）
@@ -1482,9 +1484,7 @@ pub fn run() {
             set_note_collapsed,
             create_note,
             delete_note,
-            set_autostart,
             hide_note,
-            quit_app
         ])
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")
