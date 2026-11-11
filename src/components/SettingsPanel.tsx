@@ -8,21 +8,24 @@ import {
   swatchStyle,
 } from "../theme";
 import type { NoteColor, NoteStyle, NoteTheme } from "../theme";
-import { PowerIcon, TrashIcon, TrayIcon } from "./icons";
+import { TrashIcon, TrayIcon } from "./icons";
 
+/**
+ * 便签设置面板：只放**这张便签**的东西（外观 / 置顶 / 隐藏 / 删除）。
+ *
+ * 「开机自启」「退出应用」这类**整个应用**的操作不在这里——它们属于托盘菜单。
+ * 这样两张便签的菜单互不牵连，托盘才管全局。
+ */
 type Props = {
   pinned: boolean;
-  autostart: boolean;
   storePath: string;
   style: NoteStyle;
   onStyleChange: (patch: Partial<NoteStyle>) => void;
   onTogglePin: () => void;
-  onToggleAutostart: () => void;
   onHide: () => void;
   onDelete: () => void;
-  onQuit: () => void;
   onClose: () => void;
-  /** 删除二次确认的展开状态：由 App 持有，右键菜单的「删除便签」也能直接展开它 */
+  /** 删除二次确认的展开状态：由 App 持有，右键菜单的「删除此便签」也能直接展开它 */
   confirmDelete: boolean;
   onConfirmDeleteChange: (next: boolean) => void;
 };
@@ -124,15 +127,12 @@ const THEME_OPTIONS: { id: NoteTheme; label: string }[] = [
 
 export default function SettingsPanel({
   pinned,
-  autostart,
   storePath,
   style,
   onStyleChange,
   onTogglePin,
-  onToggleAutostart,
   onHide,
   onDelete,
-  onQuit,
   onClose,
   confirmDelete,
   onConfirmDeleteChange,
@@ -234,12 +234,6 @@ export default function SettingsPanel({
           checked={pinned}
           onChange={onTogglePin}
         />
-        <ToggleRow
-          label="开机自启"
-          desc="登录 Windows 后自动运行"
-          checked={autostart}
-          onChange={onToggleAutostart}
-        />
 
         <div className="note-divider my-1 h-px" />
 
@@ -285,15 +279,6 @@ export default function SettingsPanel({
             删除此便签
           </button>
         )}
-
-        <button
-          type="button"
-          onClick={onQuit}
-          className="note-text note-danger-hover note-focus flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[0.75em] transition-colors focus-visible:outline-none"
-        >
-          <PowerIcon className="note-faint h-[0.875em] w-[0.875em]" />
-          退出应用
-        </button>
 
         <div className="note-subtle-bg mt-1 rounded-md px-2 py-1.5">
           <div className="note-label text-[0.5625em] uppercase tracking-[0.12em]">
