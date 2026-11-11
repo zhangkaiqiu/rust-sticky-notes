@@ -1,4 +1,5 @@
-//! 隐藏调试参数解析（`--dump` / `--check` / `--set-pin` / `--new-note`）。
+//! 隐藏调试参数解析（`--dump` / `--check` / `--set-pin` / `--new-note` /
+//! `--sink-notes` / `--raise-all`）。
 //!
 //! 这些参数**不是**面向用户的入口（UI 里没有对应按钮），只服务于
 //! `scripts/check-zorder.ps1` 与手工排查。命令行会被单实例插件转发到已运行的实例里
@@ -15,6 +16,8 @@
 //!                             走和 UI 完全相同的后端路径切换置顶
 //! --new-note                  按 UI 相同路径新建一张便签（脚本准备"≥2 张"用）
 //! --delete-note <note_id>     删除指定便签（脚本清理自己建的临时便签用）
+//! --sink-notes                把所有未置顶便签重新垫底、层位意图复位为 Sunk（回归复位用）
+//! --raise-all                 把所有便签抬到前台应用之上（等价于点托盘左键，脚本用）
 //! --exit-after-dump           dump / check 完成后退出进程，退出码 = 断言结果
 //! ```
 
@@ -33,6 +36,10 @@ pub struct Cli {
     pub new_note: bool,
     /// `--delete-note <note_id>`：删除指定便签（清理脚本自己建的临时便签）
     pub delete_note: Option<String>,
+    /// `--sink-notes`：把所有未置顶便签重新垫底、层位意图复位成 Sunk
+    pub sink_notes: bool,
+    /// `--raise-all`：把所有便签抬到前台应用之上（等价于点托盘左键）
+    pub raise_all: bool,
     /// `--exit-after-dump`：执行完就退出，退出码表示断言结果
     pub exit_after_dump: bool,
 }
@@ -45,6 +52,8 @@ impl Cli {
             || self.set_pin.is_some()
             || self.new_note
             || self.delete_note.is_some()
+            || self.sink_notes
+            || self.raise_all
     }
 }
 
@@ -60,6 +69,8 @@ pub fn parse(argv: &[String]) -> Option<Cli> {
             "--dump" => cli.dump = true,
             "--check" => cli.check = true,
             "--new-note" => cli.new_note = true,
+            "--sink-notes" => cli.sink_notes = true,
+            "--raise-all" => cli.raise_all = true,
             "--exit-after-dump" => cli.exit_after_dump = true,
             "--out" => {
                 if let Some(value) = args.next() {

@@ -4,13 +4,18 @@
     rust-sticky-notes 窗口层级回归断言（一键、无人工、失败返回非 0）。
 
 .DESCRIPTION
-    先用 --dump / --check 把"窗口层级"变成 JSON，再对下面 5 个场景逐条断言：
+    先用 --dump / --check 把"窗口层级"变成 JSON，再对下面 6 个场景逐条断言：
 
       1. 基线      ：便签数 ≥ 2，6 条不变量全部通过
-      2. 前台覆盖  ：把普通应用（记事本）拉到前台，未置顶便签不得压住它
-      3. 切置顶    ：--set-pin auto true/false，置顶生效、且未置顶那张仍被前台覆盖
-      4. 兄弟不连坐：两张一钉一不钉，反复切 2 轮，未置顶那张的 z 始终在前台之后
-      5. 重启一致性：关进程 → 重启 → 置顶状态与 store 完全一致
+      2. 前台覆盖  ：先 --sink-notes 复位成"沉底"，再把普通应用（记事本）拉到前台，
+                     未置顶便签不得压住它
+      3. 切置顶    ：--set-pin auto true/false。0.4.1 起取消置顶**不再沉降**：
+                     断言该便签仍在记事本之上（z 更小）、topmost=false、raised=true
+      4. 兄弟不连坐：一钉一不钉、每轮先 --sink-notes，反复切 2 轮，
+                     未置顶那张（Sunk）始终在记事本之下
+      5. 托盘抬升  ：--sink-notes → --raise-all（等价于点托盘左键）→
+                     断言所有便签的 z 都小于记事本的 z，且再 dump 一次仍然成立
+      6. 重启一致性：关进程 → 重启 → 置顶状态与 store 完全一致
 
     全程不靠人眼看截图，判定只用 dump / check 里的数值。
     结束时清理：关掉自己启动的记事本、恢复改动过的置顶状态、删除自己建的临时便签。
@@ -28,7 +33,7 @@
     保留 %TEMP% 下的 sticky-dump.json / sticky-check.*（默认失败时也会保留）。
 
 .EXAMPLE
-    pwsh -File scripts\check-zorder.ps1
+    powershell -File scripts\check-zorder.ps1
 
 .EXAMPLE
     pwsh -File scripts\check-zorder.ps1 -Exe 'D:\build\rust-sticky-notes.exe' -SkipRestart
@@ -78,7 +83,7 @@ function Add-Result {
     [void]$script:Results.Add([pscustomobject]@{ Name = $Name; Ok = $Ok; Detail = $Detail })
 }
 
-# ---------------------------------------------------------------- Win32（把窗口拉到前台）
+# ---------------------------------------------------------------- Win32（把窗口拉到前台 + 算 z 序号）
 
 if (-not ('StickyCheckNative' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -95,6 +100,10 @@ public static class StickyCheckNative
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, System.Text.StringBuilder buf, int len);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     // 后台进程默认没有"允许前台"的权限，先 AttachThreadInput 到当前前台线程再抢，
     // 这是脚本能在不点鼠标的情况下把记事本拉到前台的关键。
@@ -120,6 +129,22 @@ public static class StickyCheckNative
         var buf = new System.Text.StringBuilder(256);
         GetClassNameW(h, buf, 256);
         return buf.ToString();
+    }
+
+    // 与 Rust 侧 --dump 的 z 口径完全一致：全体"可见"顶层窗口的 EnumWindows 顺序（0 = 最前）。
+    //
+    // 关键：一次调用返回**整份**有序窗口表，便签和参照窗口（记事本）的序号必须从
+    // **同一次枚举**里取。分两次取会出现"两边各自数一遍、中途层级变了一下"的偏差，
+    // 表现为 便签 z=4 与 记事本 z=4 这种不可能的自相矛盾读数。
+    public static IntPtr[] ZOrder()
+    {
+        var list = new System.Collections.Generic.List<IntPtr>();
+        EnumWindows(delegate(IntPtr h, IntPtr l)
+        {
+            if (IsWindowVisible(h)) list.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        return list.ToArray();
     }
 }
 '@
@@ -198,6 +223,17 @@ function Set-NotePin {
     Invoke-StickyCommand -Arguments @('--set-pin', $NoteId, $truth, '--dump') -Artifact $script:DumpPath | Out-Null
 }
 
+# 把所有未置顶便签复位成"沉底"（层位意图 Sunk），并把意图落回默认值。
+# 0.4.1 起取消置顶/托盘抬升都会把窗口标成 Raised，回归前必须显式复位才有确定的起点。
+function Invoke-SinkNotes {
+    return (Invoke-StickyCommand -Arguments @('--sink-notes', '--dump') -Artifact $script:DumpPath)
+}
+
+# 等价于点托盘左键：走同一条 raise_notes 路径，把所有便签抬到前台应用之上。
+function Invoke-RaiseAll {
+    return (Invoke-StickyCommand -Arguments @('--raise-all', '--dump') -Artifact $script:DumpPath)
+}
+
 # 删除便签同样落到 dump 文件上
 function Remove-NoteById {
     param([string]$NoteId)
@@ -237,6 +273,40 @@ function Get-PinMap {
 function Get-WindowOf {
     param($Dump, [string]$NoteId)
     return ($Dump.windows | Where-Object { $_.note_id -eq $NoteId } | Select-Object -First 1)
+}
+
+# 一次枚举拿到"z 序号表"（hwnd -> 序号），之后的比较全部在同一张表上做。
+function Get-ZTable {
+    $map = @{}
+    $list = [StickyCheckNative]::ZOrder()
+    for ($i = 0; $i -lt $list.Length; $i++) { $map[$list[$i].ToInt64()] = $i }
+    return $map
+}
+
+# 参照窗口（记事本）与便签的 z 必须在**同一次**枚举里取，否则会出现
+# "便签 z=4、记事本 z=4" 这种自相矛盾的读数（场景 5 上一版的假失败就是它）。
+function Get-ZSnapshot {
+    param($Dump, [IntPtr]$RefHwnd)
+    $table = Get-ZTable
+    $refZ = $null
+    if ($RefHwnd -ne [IntPtr]::Zero) {
+        $key = $RefHwnd.ToInt64()
+        if ($table.ContainsKey($key)) { $refZ = [int]$table[$key] }
+    }
+    $noteZ = @{}
+    foreach ($w in $Dump.windows) {
+        $key = [int64]$w.hwnd
+        if ($table.ContainsKey($key)) { $noteZ[$w.note_id] = [int]$table[$key] }
+    }
+    return [pscustomobject]@{ RefZ = $refZ; NoteZ = $noteZ }
+}
+
+function Get-NotepadHwnd {
+    if ($null -eq $script:ForegroundProc) { return [IntPtr]::Zero }
+    $proc = Get-Process -Id $script:ForegroundProc.Id -ErrorAction SilentlyContinue
+    if ($null -eq $proc) { return [IntPtr]::Zero }
+    $proc.Refresh()
+    return [IntPtr]$proc.MainWindowHandle
 }
 
 # ---------------------------------------------------------------- 前置条件
@@ -333,7 +403,7 @@ function Get-ForegroundInfo {
 # ---------------------------------------------------------------- 场景
 
 function Step-Baseline {
-    Write-Step '场景 1/5：基线（便签数 ≥ 2 + 六条不变量）'
+    Write-Step '场景 1/6：基线（便签数 ≥ 2 + 六条不变量）'
 
     $check = Invoke-StickyCheck
     $dump = Read-Dump
@@ -367,8 +437,10 @@ function Step-Baseline {
 }
 
 function Step-ForegroundCover {
-    Write-Step '场景 2/5：前台覆盖（未置顶便签不得压住前台应用）'
+    Write-Step '场景 2/6：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
 
+    # 0.4.1：抬升/取消置顶都会留下 Raised 意图，先显式复位成 Sunk 才有确定起点
+    Invoke-SinkNotes | Out-Null
     $ok = Start-ForegroundApp
     Start-Sleep -Milliseconds 60
     $check = Invoke-StickyCheck
@@ -382,7 +454,7 @@ function Step-ForegroundCover {
 }
 
 function Step-TogglePin {
-    Write-Step '场景 3/5：--set-pin 切换置顶（置顶生效 / 取消置顶回落）'
+    Write-Step '场景 3/6：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
 
     $dump = Read-Dump
     $sorted = @($dump.notes | Sort-Object id)
@@ -400,20 +472,32 @@ function Step-TogglePin {
     Add-Result '切置顶 true：置顶一致 + 置顶在最前' ((Test-CheckPassed -Check $check -Id 'pin_consistency') -and (Test-CheckPassed -Check $check -Id 'pinned_on_top')) ('{0}；{1}' -f (Describe-Check -Check $check -Id 'pin_consistency'), (Describe-Check -Check $check -Id 'pinned_on_top'))
     Add-Result '切置顶 true：未置顶那张仍被前台覆盖' (Test-CheckPassed -Check $check -Id 'no_cover_foreground') (Describe-Check -Check $check -Id 'no_cover_foreground')
 
-    # --- 取消置顶
+    # --- 取消置顶（0.4.1 语义反转：不沉降，仍停在记事本之上）
+    $refHwnd = Get-NotepadHwnd
     Set-NotePin -NoteId $target -Pinned $false
     Start-ForegroundApp | Out-Null
     $check = Invoke-StickyCheck
     $dump = Read-Dump
     $win = Get-WindowOf -Dump $dump -NoteId $target
     $note = $dump.notes | Where-Object { $_.id -eq $target } | Select-Object -First 1
+    $zs = Get-ZSnapshot -Dump $dump -RefHwnd $refHwnd
+    $refZ = $zs.RefZ
+    $noteZ = if ($zs.NoteZ.ContainsKey($target)) { $zs.NoteZ[$target] } else { $null }
+
     Add-Result '切置顶 false：目标便签退出置顶层' ((-not [bool]$win.topmost) -and (-not [bool]$note.pinned)) ("exstyle={0} topmost={1} data.pinned={2}" -f $win.exstyle, $win.topmost, $note.pinned)
-    Add-Result '切置顶 false：两张便签都在前台之下' (Test-CheckPassed -Check $check -Id 'no_cover_foreground') (Describe-Check -Check $check -Id 'no_cover_foreground')
+    $stillAbove = ($null -ne $noteZ) -and ($null -ne $refZ) -and ([int]$noteZ -lt [int]$refZ)
+    Add-Result '切置顶 false：目标便签仍在记事本之上（没有沉降）' $stillAbove ("便签 z={0} 记事本 z={1}" -f $noteZ, $refZ)
+    Add-Result '切置顶 false：目标便签被标记为 raised' ([bool]$win.raised) ("raised={0}" -f $win.raised)
     Add-Result '切置顶 false：置顶一致（没有连带状态漂移）' (Test-CheckPassed -Check $check -Id 'pin_consistency') (Describe-Check -Check $check -Id 'pin_consistency')
 }
 
+function Read-NoteDump {
+    # 保证拿到的是最新快照（重启后旧的 dump 可能还在）
+    return (Invoke-StickyDump)
+}
+
 function Step-SiblingIsolation {
-    Write-Step '场景 4/5：兄弟不连坐（一钉一不钉，切 2 轮）'
+    Write-Step '场景 4/6：兄弟不连坐（一钉一不钉，切 2 轮）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -424,18 +508,27 @@ function Step-SiblingIsolation {
         $pinned = if ($round -eq 1) { $a } else { $b }
         $unpinned = if ($round -eq 1) { $b } else { $a }
 
-        # 只改真正需要改的那张：多余的一次切换不仅慢，还会掩盖"只动一张"的结论
+        # 每轮从"全部沉底"开始，断言才有确定起点
+        Invoke-SinkNotes | Out-Null
         $pins = Get-PinMap (Read-Dump)
+        if ($pins[$unpinned]) {
+            # 取消置顶会把它标成 Raised（0.4.1 的预期行为），这里要的是"Sunk 兄弟不连坐"，
+            # 所以复位一次，让它回到"还沉在底部"的状态再断言。
+            Set-NotePin -NoteId $unpinned -Pinned $false
+            Invoke-SinkNotes | Out-Null
+        }
+        # 只改真正需要改的那张：多余的一次切换不仅慢，还会掩盖"只动一张"的结论
         if (-not $pins[$pinned]) { Set-NotePin -NoteId $pinned -Pinned $true }
-        if ($pins[$unpinned]) { Set-NotePin -NoteId $unpinned -Pinned $false }
         Start-ForegroundApp | Out-Null
         $check = Invoke-StickyCheck
         $dump = Read-Dump
-
-        $fgZ = $dump.foreground.z
+        $zs = Get-ZSnapshot -Dump $dump -RefHwnd (Get-NotepadHwnd)
+        $fgZ = $zs.RefZ
         $unpinnedWin = Get-WindowOf -Dump $dump -NoteId $unpinned
-        $belowForeground = ($null -ne $fgZ) -and ($null -ne $unpinnedWin.z) -and ([int]$unpinnedWin.z -gt [int]$fgZ)
-        Add-Result ("兄弟不连坐 第{0}轮：未置顶 {1} 的 z 仍大于前台 z" -f $round, $unpinned.Substring(0, 8)) $belowForeground ("未置顶 z={0} 前台 z={1} class={2}" -f $unpinnedWin.z, $fgZ, $dump.foreground.class)
+        $unpinnedZ = $null
+        if ($zs.NoteZ.ContainsKey($unpinned)) { $unpinnedZ = [int]$zs.NoteZ[$unpinned] }
+        $belowForeground = ($null -ne $fgZ) -and ($null -ne $unpinnedZ) -and ($unpinnedZ -gt [int]$fgZ)
+        Add-Result ("兄弟不连坐 第{0}轮：未置顶(仍 Sunk) {1} 的 z 仍大于前台 z" -f $round, $unpinned.Substring(0, 8)) $belowForeground ("未置顶 z={0} raised={1} 前台 z={2} class={3}" -f $unpinnedZ, $unpinnedWin.raised, $fgZ, $dump.foreground.class)
         Add-Result ("兄弟不连坐 第{0}轮：置顶一致" -f $round) (Test-CheckPassed -Check $check -Id 'pin_consistency') (Describe-Check -Check $check -Id 'pin_consistency')
 
         $script:ChangedPins[$a] = $true
@@ -443,13 +536,61 @@ function Step-SiblingIsolation {
     }
 }
 
-function Read-NoteDump {
-    # 保证拿到的是最新快照（重启后旧的 dump 可能还在）
-    return (Invoke-StickyDump)
+function Step-RaiseAll {
+    Write-Step '场景 5/6：托盘抬升等价路径（--raise-all）'
+
+    $refHwnd = Get-NotepadHwnd
+    Invoke-SinkNotes | Out-Null
+    Start-ForegroundApp | Out-Null
+    $beforeDump = Read-Dump
+    $before = Get-ZSnapshot -Dump $beforeDump -RefHwnd $refHwnd
+    $sunkOk = $true
+    $sunkDetail = @()
+    foreach ($w in $beforeDump.windows) {
+        if (-not [bool]$w.visible) { continue }
+        if ([bool]$w.topmost) { continue }
+        if (-not $before.NoteZ.ContainsKey($w.note_id)) { continue }
+        $z = [int]$before.NoteZ[$w.note_id]
+        $sunkDetail += ('{0} z={1}' -f $w.note_id.Substring(0, 8), $z)
+        if ($null -eq $before.RefZ -or $z -lt [int]$before.RefZ) { $sunkOk = $false }
+    }
+    Add-Result '托盘抬升 前置：沉底后所有未置顶便签都在记事本之下' $sunkOk (('{0}；记事本 z={1}' -f ($sunkDetail -join '、'), $before.RefZ))
+
+    # 等价于点托盘左键
+    $raiseDump = Invoke-RaiseAll
+    $after = Get-ZSnapshot -Dump $raiseDump -RefHwnd $refHwnd
+
+    $bad = @()
+    $checked = @()
+    foreach ($w in $raiseDump.windows) {
+        if (-not [bool]$w.visible) { continue }
+        if (-not $after.NoteZ.ContainsKey($w.note_id)) { continue }
+        $z = [int]$after.NoteZ[$w.note_id]
+        $checked += ('{0} z={1}' -f $w.note_id.Substring(0, 8), $z)
+        if ($null -eq $after.RefZ -or $z -ge [int]$after.RefZ) { $bad += ('{0} z={1} >= 记事本 z={2}' -f $w.note_id.Substring(0, 8), $z, $after.RefZ) }
+    }
+    $allAbove = ($bad.Count -eq 0) -and ($checked.Count -gt 0)
+    Add-Result '托盘抬升：所有便签的 z 都小于记事本的 z' $allAbove ($(if ($bad.Count -gt 0) { $bad -join '；' } else { ($checked -join '、') + ('；记事本 z={0}' -f $after.RefZ) }))
+
+    # 再 dump 一次：后续不应被任何自动逻辑踩回去
+    Start-Sleep -Milliseconds 150
+    $againDump = Read-NoteDump
+    $again = Get-ZSnapshot -Dump $againDump -RefHwnd $refHwnd
+    $bad2 = @()
+    $checked2 = @()
+    foreach ($w in $againDump.windows) {
+        if (-not [bool]$w.visible) { continue }
+        if (-not $again.NoteZ.ContainsKey($w.note_id)) { continue }
+        $z = [int]$again.NoteZ[$w.note_id]
+        $checked2 += ('{0} z={1}' -f $w.note_id.Substring(0, 8), $z)
+        if ($null -eq $again.RefZ -or $z -ge [int]$again.RefZ) { $bad2 += ('{0} z={1} >= 记事本 z={2}' -f $w.note_id.Substring(0, 8), $z, $again.RefZ) }
+    }
+    Add-Result '托盘抬升：之后没有便签被踩回记事本之下' ($bad2.Count -eq 0) ($(if ($bad2.Count -gt 0) { $bad2 -join '；' } else { ($checked2 -join '、') + ('；记事本 z={0}' -f $again.RefZ) }))
+    Add-Result '托盘抬升：所有便签都被标记为 raised' (@($raiseDump.windows | Where-Object { -not [bool]$_.raised }).Count -eq 0) (($raiseDump.windows | ForEach-Object { '{0} raised={1}' -f $_.note_id.Substring(0, 8), $_.raised }) -join '、')
 }
 
 function Step-RestartConsistency {
-    Write-Step '场景 5/5：重启一致性（置顶状态与 store 一致）'
+    Write-Step '场景 6/6：重启一致性（置顶状态与 store 一致）'
 
     $dump = Read-Dump
     $pinsBefore = Get-PinMap $dump
@@ -495,8 +636,8 @@ function Show-FailureContext {
         Write-Host ('前台: hwnd={0} class="{1}" title="{2}" is_ours={3} z={4}' -f $dump.foreground.hwnd, $dump.foreground.class, $dump.foreground.title, $dump.foreground.is_ours, $dump.foreground.z)
         Write-Host '窗口:'
         foreach ($w in $dump.windows) {
-            Write-Host ('  {0} hwnd={1} ex={2} topmost={3} owner={4}/{5} z={6}/{7} rect={8}x{9} visible={10}' -f `
-                    $w.label, $w.hwnd, $w.exstyle, $w.topmost, $w.owner_hwnd, $w.owner_class, $w.z, $w.z_total, $w.rect.w, $w.rect.h, $w.visible)
+            Write-Host ('  {0} hwnd={1} ex={2} topmost={3} raised={4} owner={5}/{6} z={7}/{8} rect={9}x{10} visible={11}' -f `
+                    $w.label, $w.hwnd, $w.exstyle, $w.topmost, $w.raised, $w.owner_hwnd, $w.owner_class, $w.z, $w.z_total, $w.rect.w, $w.rect.h, $w.visible)
         }
         Write-Host '便签:'
         foreach ($n in $dump.notes) {
@@ -509,7 +650,7 @@ function Show-FailureContext {
     }
     if (Test-Path -LiteralPath $script:CheckTxt) {
         Write-Host '检查结果:'
-        Get-Content -LiteralPath $script:CheckTxt | Where-Object { $_ -match '^\[(FAIL|SKIP)\]|^FAIL' } | ForEach-Object { Write-Host ('  ' + $_) }
+        Get-Content -LiteralPath $script:CheckTxt -Encoding UTF8 | Where-Object { $_ -match '^\[(FAIL|SKIP)\]|^FAIL' } | ForEach-Object { Write-Host ('  ' + $_) }
     }
 }
 
@@ -548,6 +689,12 @@ function Restore-State {
             Write-Host ('   删除临时便签失败：{0}' -f $_.Exception.Message) -ForegroundColor Yellow
         }
     }
+    # 层位复位：把最后留下的 Raised 状态收回 Sunk，让用户的便签回到"桌面便签"的常态
+    try {
+        Invoke-SinkNotes | Out-Null
+    } catch {
+        Write-Host ('   层位复位失败：{0}' -f $_.Exception.Message) -ForegroundColor Yellow
+    }
 }
 
 function Clear-Artifacts {
@@ -571,8 +718,9 @@ try {
     Step-ForegroundCover
     Step-TogglePin
     Step-SiblingIsolation
+    Step-RaiseAll
     if ($SkipRestart) {
-        Write-Step '场景 5/5：重启一致性 —— 已按 -SkipRestart 跳过'
+        Write-Step '场景 6/6：重启一致性 —— 已按 -SkipRestart 跳过'
     } else {
         Step-RestartConsistency
     }
