@@ -4,18 +4,20 @@
     rust-sticky-notes 窗口层级回归断言（一键、无人工、失败返回非 0）。
 
 .DESCRIPTION
-    先用 --dump / --check 把"窗口层级"变成 JSON，再对下面 6 个场景逐条断言：
+    先用 --dump / --check 把"窗口层级"变成 JSON，再对下面 7 个场景逐条断言：
 
       1. 基线      ：便签数 ≥ 2，6 条不变量全部通过
       2. 前台覆盖  ：先 --sink-notes 复位成"沉底"，再把普通应用（记事本）拉到前台，
                      未置顶便签不得压住它
       3. 切置顶    ：--set-pin auto true/false。0.4.1 起取消置顶**不再沉降**：
                      断言该便签仍在记事本之上（z 更小）、topmost=false、raised=true
-      4. 兄弟不连坐：一钉一不钉、每轮先 --sink-notes，反复切 2 轮，
+      4. 取消置顶不影响兄弟：一钉一不钉、兄弟仍为 Sunk → 取消置顶那张 →
+                     断言兄弟 raised 仍为 false 且 z 仍在前台应用之后（没被拉上来）
+      5. 兄弟不连坐：一钉一不钉、每轮先 --sink-notes，反复切 2 轮，
                      未置顶那张（Sunk）始终在记事本之下
-      5. 托盘抬升  ：--sink-notes → --raise-all（等价于点托盘左键）→
+      6. 托盘抬升  ：--sink-notes → --raise-all（等价于点托盘左键）→
                      断言所有便签的 z 都小于记事本的 z，且再 dump 一次仍然成立
-      6. 重启一致性：关进程 → 重启 → 置顶状态与 store 完全一致
+      7. 重启一致性：关进程 → 重启 → 置顶状态与 store 完全一致
 
     全程不靠人眼看截图，判定只用 dump / check 里的数值。
     结束时清理：关掉自己启动的记事本、恢复改动过的置顶状态、删除自己建的临时便签。
@@ -403,7 +405,7 @@ function Get-ForegroundInfo {
 # ---------------------------------------------------------------- 场景
 
 function Step-Baseline {
-    Write-Step '场景 1/6：基线（便签数 ≥ 2 + 六条不变量）'
+    Write-Step '场景 1/7：基线（便签数 ≥ 2 + 六条不变量）'
 
     $check = Invoke-StickyCheck
     $dump = Read-Dump
@@ -437,7 +439,7 @@ function Step-Baseline {
 }
 
 function Step-ForegroundCover {
-    Write-Step '场景 2/6：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
+    Write-Step '场景 2/7：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
 
     # 0.4.1：抬升/取消置顶都会留下 Raised 意图，先显式复位成 Sunk 才有确定起点
     Invoke-SinkNotes | Out-Null
@@ -454,7 +456,7 @@ function Step-ForegroundCover {
 }
 
 function Step-TogglePin {
-    Write-Step '场景 3/6：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
+    Write-Step '场景 3/7：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
 
     $dump = Read-Dump
     $sorted = @($dump.notes | Sort-Object id)
@@ -496,8 +498,61 @@ function Read-NoteDump {
     return (Invoke-StickyDump)
 }
 
+# 0.4.2 新增：取消置顶**不得**把兄弟便签一起拉上来。
+#
+# 这是用户报的"两个标签联动"bug：A 置顶在前、B 沉底在后，点 A 取消置顶，
+# B 会瞬间窜到前台应用之上。根因是 tao 的 set_always_on_top(false) 走
+# SetWindowPos(HWND_NOTOPMOST) 且**不带** SWP_NOOWNERZORDER，激活 + 改 z 序
+# 会牵动同一个 owner 组（owner = Progman）的兄弟窗口。
+# 新实现不调 tao，所有 z 序动作都显式带 SWP_NOOWNERZORDER，并由 reconcile 全量重排。
+function Step-UnpinIsolation {
+    Write-Step '场景 4/7：取消置顶不影响兄弟（兄弟不得被连带拉起）'
+
+    $dump = Read-NoteDump
+    $sorted = @($dump.notes | Sort-Object id)
+    $a = $sorted[0].id
+    $b = $sorted[1].id
+
+    # 起点：A 置顶、B 沉底（Sunk），前台是记事本
+    Invoke-SinkNotes | Out-Null
+    $pins = Get-PinMap (Read-Dump)
+    if ($pins[$a]) {
+        Set-NotePin -NoteId $a -Pinned $false
+        Invoke-SinkNotes | Out-Null
+    }
+    Set-NotePin -NoteId $a -Pinned $true
+    Start-ForegroundApp | Out-Null
+    $beforeDump = Read-Dump
+    $before = Get-ZSnapshot -Dump $beforeDump -RefHwnd (Get-NotepadHwnd)
+    $bBefore = Get-WindowOf -Dump $beforeDump -NoteId $b
+    $fgBefore = $before.RefZ
+    $bZBefore = if ($before.NoteZ.ContainsKey($b)) { [int]$before.NoteZ[$b] } else { $null }
+    $setupOk = ([bool]$bBefore.raised -eq $false) -and ($null -ne $fgBefore) -and ($null -ne $bZBefore) -and ($bZBefore -gt [int]$fgBefore)
+    Add-Result '取消置顶不影响兄弟 前置：兄弟仍是 Sunk 且在前台之下' $setupOk ("兄弟 raised={0} z={1} 前台 z={2}" -f $bBefore.raised, $bZBefore, $fgBefore)
+
+    # 取消 A 的置顶，**立刻** dump（不等待、不做任何复位）
+    Set-NotePin -NoteId $a -Pinned $false
+    $afterDump = Read-Dump
+    $after = Get-ZSnapshot -Dump $afterDump -RefHwnd (Get-NotepadHwnd)
+    $wA = Get-WindowOf -Dump $afterDump -NoteId $a
+    $wB = Get-WindowOf -Dump $afterDump -NoteId $b
+    $fgAfter = $after.RefZ
+    $aZ = if ($after.NoteZ.ContainsKey($a)) { [int]$after.NoteZ[$a] } else { $null }
+    $bZAfter = if ($after.NoteZ.ContainsKey($b)) { [int]$after.NoteZ[$b] } else { $null }
+
+    Add-Result '取消置顶不影响兄弟：被取消的那张 topmost=false、raised=true' ((-not [bool]$wA.topmost) -and [bool]$wA.raised) ("exstyle={0} topmost={1} raised={2}" -f $wA.exstyle, $wA.topmost, $wA.raised)
+    $aStillAbove = ($null -ne $aZ) -and ($null -ne $fgAfter) -and ($aZ -lt [int]$fgAfter)
+    Add-Result '取消置顶不影响兄弟：被取消的那张仍在前台应用之前（没有沉降）' $aStillAbove ("被取消的 z={0} 前台 z={1}" -f $aZ, $fgAfter)
+    Add-Result '取消置顶不影响兄弟：兄弟 raised 仍为 false（没被连带抬起）' (-not [bool]$wB.raised) ("raised={0} exstyle={1}" -f $wB.raised, $wB.exstyle)
+    $bStillBelow = ($null -ne $bZAfter) -and ($null -ne $fgAfter) -and ($bZAfter -gt [int]$fgAfter)
+    Add-Result '取消置顶不影响兄弟：兄弟 z 仍在前台应用之后（没被拉上来）' $bStillBelow ("兄弟 z={0}（取消前 {1}）前台 z={2}" -f $bZAfter, $bZBefore, $fgAfter)
+
+    $script:ChangedPins[$a] = $true
+    $script:ChangedPins[$b] = $true
+}
+
 function Step-SiblingIsolation {
-    Write-Step '场景 4/6：兄弟不连坐（一钉一不钉，切 2 轮）'
+    Write-Step '场景 5/7：兄弟不连坐（一钉一不钉，切 2 轮）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -537,7 +592,7 @@ function Step-SiblingIsolation {
 }
 
 function Step-RaiseAll {
-    Write-Step '场景 5/6：托盘抬升等价路径（--raise-all）'
+    Write-Step '场景 6/7：托盘抬升等价路径（--raise-all）'
 
     $refHwnd = Get-NotepadHwnd
     Invoke-SinkNotes | Out-Null
@@ -590,7 +645,7 @@ function Step-RaiseAll {
 }
 
 function Step-RestartConsistency {
-    Write-Step '场景 6/6：重启一致性（置顶状态与 store 一致）'
+    Write-Step '场景 7/7：重启一致性（置顶状态与 store 一致）'
 
     $dump = Read-Dump
     $pinsBefore = Get-PinMap $dump
@@ -717,10 +772,11 @@ try {
     Step-Baseline
     Step-ForegroundCover
     Step-TogglePin
+    Step-UnpinIsolation
     Step-SiblingIsolation
     Step-RaiseAll
     if ($SkipRestart) {
-        Write-Step '场景 6/6：重启一致性 —— 已按 -SkipRestart 跳过'
+        Write-Step '场景 7/7：重启一致性 —— 已按 -SkipRestart 跳过'
     } else {
         Step-RestartConsistency
     }
