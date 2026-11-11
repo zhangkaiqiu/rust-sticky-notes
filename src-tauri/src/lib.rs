@@ -812,8 +812,31 @@ fn run_cli(app: &AppHandle, command: &cli::Cli, forwarded: bool) {
     run_cli_after_note(app, command);
 }
 
-/// `--new-note` 之后的部分：删除便签 → 切置顶 → dump / check
+/// `--new-note` 之后的部分：删除便签 → 切置顶 → 层位复位/抬升 → dump / check
 fn run_cli_after_note(app: &AppHandle, command: &cli::Cli) {
+    if command.sink_notes {
+        #[cfg(windows)]
+        {
+            let windows = note_windows_in_store_order(app);
+            let sunk = win_desktop_pin::sink_all_notes(&windows);
+            let line = format!("已把 {sunk} 张未置顶便签复位为 Sunk（重新垫底）");
+            println!("[diag] {line}");
+            diagnostics::console_notice(&line);
+        }
+    }
+
+    if command.raise_all {
+        #[cfg(windows)]
+        {
+            // 等价于点托盘左键：走同一条 `raise_notes` 路径，脚本不必去点托盘
+            let windows = note_windows_in_store_order(app);
+            let raised = win_desktop_pin::raise_notes(&windows);
+            let line = format!("已把 {raised} 张便签抬到前台应用之上");
+            println!("[diag] {line}");
+            diagnostics::console_notice(&line);
+        }
+    }
+
     if let Some(id) = command.delete_note.clone() {
         let result = app
             .try_state::<AppState>()
@@ -933,8 +956,21 @@ fn ensure_window_visible(window: &WebviewWindow) -> bool {
     changed
 }
 
-fn focus_existing_notes(app: &AppHandle) {
+/// 按 store 里的顺序取出当前所有便签窗口（`raise_notes` / `sink_all_notes` 的入参）。
+///
+/// 顺序有意义：`raise_notes` 从后往前抬，所以数组第一张最终在最前面、也是被聚焦的那张。
+fn note_windows_in_store_order(app: &AppHandle) -> Vec<WebviewWindow> {
     let Some(state) = app.try_state::<AppState>() else {
+        return Vec::new();
+    };
+    let notes = state.read(|s| s.notes.clone()).unwrap_or_default();
+    notes
+        .iter()
+        .filter_map(|note| app.get_webview_window(&note_label(&note.id)))
+        .collect()
+}
+
+fn focus_existing_notes(app: &AppHandle) {    let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     let notes = state.read(|s| s.notes.clone()).unwrap_or_default();
@@ -967,21 +1003,30 @@ fn focus_existing_notes(app: &AppHandle) {
     }
 }
 
+/// 托盘左键 / `--raise-all` 的统一入口：把**全部**便签显式抬到前台应用之上。
+///
+/// 0.4.1 修正（BUG B）：以前这里只对最后一个窗口 `set_focus()`，该窗口的
+/// `Focused(true)` 会触发 `park_siblings_behind`，把其它未置顶便签全部 `HWND_BOTTOM`
+/// ——结果就是"一张在前面、另一张被踩到底"，中间那一瞬的抬起-沉降是用户看到的"闪一下"。
+///
+/// 现在：`ensure_window_visible` 全部 → `raise_notes` 逐张标记 `Raised` 并抬到
+/// `HWND_TOP`（置顶的抬 `HWND_TOPMOST`）→ 更新 `visible` → 由 `raise_notes` 统一聚焦一次。
+/// 后续 `Focused(true)` 因为兄弟窗口已经是 `Raised` 而不会再被踩回去。
 fn show_all_notes(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     let notes = state.read(|s| s.notes.clone()).unwrap_or_default();
-    let mut last = None;
+    let mut windows: Vec<WebviewWindow> = Vec::new();
 
     for note in &notes {
         if let Some(window) = app.get_webview_window(&note_label(&note.id)) {
-            // 已可见的窗口不重复 show，避免把整排便签抬到前台应用之上
+            // 已可见的窗口不重复 show（show 会重新激活并把整排抬起来）
             ensure_window_visible(&window);
-            last = Some(window);
+            windows.push(window);
         } else {
             match create_note_window(app, note, false) {
-                Ok(window) => last = Some(window),
+                Ok(window) => windows.push(window),
                 Err(err) => eprintln!("[window] 恢复便签 {} 失败：{err}", note.id),
             }
         }
@@ -993,7 +1038,19 @@ fn show_all_notes(app: &AppHandle) {
         }
     });
 
-    if let Some(window) = last {
+    #[cfg(windows)]
+    {
+        // 按 store 里的顺序传入（最后一张先抬，第一张最终在最前），焦点也落在第一张上
+        let raised = win_desktop_pin::raise_notes(&windows);
+        if raised == 0 {
+            // 没有可用句柄时退化成老行为：至少别让用户觉得点击没反应
+            if let Some(window) = windows.last() {
+                let _ = window.set_focus();
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    if let Some(window) = windows.first() {
         let _ = window.set_focus();
     }
 }
