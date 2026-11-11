@@ -104,22 +104,6 @@ export function TrayIcon({ className = base }: IconProps) {
   );
 }
 
-export function PowerIcon({ className = base }: IconProps) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      className={className}
-    >
-      <path d="M12 4v7" />
-      <path d="M7.5 7.2a7 7 0 1 0 9 0" />
-    </svg>
-  );
-}
-
 export function TrashIcon({ className = base }: IconProps) {
   return (
     <svg

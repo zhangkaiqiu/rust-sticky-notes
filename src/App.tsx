@@ -25,7 +25,6 @@ export default function App() {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [pinned, setPinned] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [autostart, setAutostart] = useState(false);
   const [style, setStyle] = useState<NoteStyle>(() => normalizeStyle(null));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -57,7 +56,6 @@ export default function App() {
         setTodos(snapshot.note.todos);
         setPinned(snapshot.note.pinned);
         setCollapsed(snapshot.note.collapsed === true);
-        setAutostart(snapshot.autostart);
         setStyle(normalizeStyle(snapshot.note));
         setStorePath(snapshot.storePath);
         // 图钉图标以**窗口真实层级**为准：store 里的 pinned 只是期望值，
@@ -264,14 +262,6 @@ export default function App() {
     }
   }, [collapsed]);
 
-  const toggleAutostart = useCallback(async () => {    try {
-      const actual = await api.setAutostart(!autostart);
-      setAutostart(actual);
-    } catch (err) {
-      setError(`切换开机自启失败：${String(err)}`);
-    }
-  }, [autostart]);
-
   const hideToTray = useCallback(() => {
     setSettingsOpen(false);
     setConfirmDelete(false);
@@ -283,10 +273,6 @@ export default function App() {
     setSettingsOpen(false);
     setConfirmDelete(false);
     void api.deleteNote().catch((err) => setError(`删除便签失败：${String(err)}`));
-  }, []);
-
-  const quit = useCallback(() => {
-    void api.quitApp();
   }, []);
 
   // ------------------------------------------------ 自定义右键菜单
@@ -523,15 +509,12 @@ export default function App() {
       {settingsOpen && (
         <SettingsPanel
           pinned={pinned}
-          autostart={autostart}
           storePath={storePath}
           style={style}
           onStyleChange={updateStyle}
           onTogglePin={togglePin}
-          onToggleAutostart={toggleAutostart}
           onHide={hideToTray}
           onDelete={deleteThisNote}
-          onQuit={quit}
           confirmDelete={confirmDelete}
           onConfirmDeleteChange={setConfirmDelete}
           onClose={() => {
