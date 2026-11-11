@@ -6,6 +6,8 @@
 //! - 前端只负责编辑，落盘统一走 Rust：文本 450ms / 外观 300ms / 窗口 400ms 防抖；
 //! - 关窗只隐藏，进程常驻托盘；真正退出走托盘菜单或设置面板。
 
+mod cli;
+mod diagnostics;
 mod store;
 #[cfg(windows)]
 mod win_desktop_pin;
@@ -41,6 +43,8 @@ const DEFAULT_EXPANDED_HEIGHT: f64 = 420.0;
 pub struct AppState {
     store: Mutex<Store>,
     path: std::path::PathBuf,
+    /// 便携模式（exe 同目录有 portable.txt）；`--dump` 会把它写进 JSON
+    portable: bool,
     /// 每个窗口几何变化的代次，用来做「安静后才能落盘」的 debounce
     geom_gen: Mutex<HashMap<String, u64>>,
     /// 当前托盘菜单的句柄。菜单对象必须一直存活（Windows 托盘仍引用它），
@@ -246,16 +250,26 @@ fn set_note_pinned(
     let webview = app
         .get_webview_window(&label)
         .ok_or_else(|| format!("便签窗口不存在：{label}"))?;
+    apply_pinned(&webview, &id, &state, pinned)
+}
 
-    // 幂等：值没变、且实际层级已经对得上，就什么都不做。
-    // 这是运行时唯一的置顶入口，重复调 tao 的 set_always_on_top(false) 会走
-    // SetWindowPos(HWND_NOTOPMOST)，副作用是把窗口顶到普通层最前面（见 win_desktop_pin
-    // 顶部注释），表现就是后台便签突然盖住前台应用。所以必须先比对再动手。
-    // 注意要同时比对"内存状态"和"真实 exstyle"：重启后可能出现两者不一致的情况，
-    // 此时不能因为值没变就直接返回，否则永远修不回来。
+/// 切换置顶的**唯一**后端路径：UI 图钉、设置面板、`--set-pin` 全都走这里。
+///
+/// 幂等：值没变、且实际层级已经对得上，就什么都不做。
+/// 这是运行时唯一的置顶入口，重复调 tao 的 `set_always_on_top(false)` 会走
+/// `SetWindowPos(HWND_NOTOPMOST)`，副作用是把窗口顶到普通层最前面（见 win_desktop_pin
+/// 顶部注释），表现就是后台便签突然盖住前台应用。所以必须先比对再动手。
+/// 注意要同时比对"内存状态"和"真实 exstyle"：重启后可能出现两者不一致的情况，
+/// 此时不能因为值没变就直接返回，否则永远修不回来。
+fn apply_pinned(
+    webview: &WebviewWindow,
+    id: &str,
+    state: &AppState,
+    pinned: bool,
+) -> Result<bool, String> {
     let current = state.read(|s| s.notes.iter().find(|n| n.id == id).map(|n| n.pinned))?;
     #[cfg(windows)]
-    let actual_now = win_desktop_pin::is_always_on_top(&webview);
+    let actual_now = win_desktop_pin::is_always_on_top(webview);
     #[cfg(not(windows))]
     let actual_now = webview.is_always_on_top().unwrap_or(false);
     if current == Some(pinned) && actual_now == pinned {
@@ -269,17 +283,30 @@ fn set_note_pinned(
     // HWND_NOTOPMOST 会把它留在普通层最前面，不补这一下就会飘在前台应用之上。
     // 同时把**其它**未置顶便签压回去：激活动作会把同 owner 组的兄弟窗口一起抬起来。
     #[cfg(windows)]
-    let actual = win_desktop_pin::set_user_pinned(&webview, pinned);
+    let actual = win_desktop_pin::set_user_pinned(webview, pinned);
     #[cfg(not(windows))]
     let actual = webview.is_always_on_top().unwrap_or(pinned);
 
     // 落盘的是"真实生效的状态"，避免图标说钉住、实际没钉住
+    let id = id.to_string();
     state.update(move |s| {
         if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
             note.pinned = actual;
         }
     })?;
     Ok(actual)
+}
+
+/// 按 id 取窗口并切换置顶（CLI 用；与 UI 完全同一条后端路径）
+fn apply_pinned_for(app: &AppHandle, id: &str, pinned: bool) -> Result<bool, String> {
+    let label = note_label(id);
+    let webview = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("便签窗口不存在：{label}（可能是一张被隐藏的便签）"))?;
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "应用状态尚未就绪".to_string())?;
+    apply_pinned(&webview, id, &state, pinned)
 }
 
 /// 折叠 / 展开当前便签。
@@ -344,30 +371,41 @@ fn set_note_collapsed(
 }
 
 #[tauri::command]
-async fn create_note(app: AppHandle) -> Result<String, String> {    // 必须是 async：同步命令跑在主线程，而建窗口要等事件循环把 WebView2 创建完，
+async fn create_note(app: AppHandle) -> Result<String, String> {
+    // 必须是 async：同步命令跑在主线程，而建窗口要等事件循环把 WebView2 创建完，
     // 主线程一阻塞就会死锁（表现为窗口建出来但是 about:blank）。
-    let note = new_note_internal(&app)?;
-    create_note_window(&app, &note, true).map_err(|e| format!("创建便签窗口失败：{e}"))?;
+    create_note_via(&app)
+}
+
+/// 新建一张便签（数据 + 窗口 + 托盘刷新）。UI 命令、托盘、`--new-note` 共用这一条路径。
+fn create_note_via(app: &AppHandle) -> Result<String, String> {
+    let note = new_note_internal(app)?;
+    create_note_window(app, &note, true).map_err(|e| format!("创建便签窗口失败：{e}"))?;
     // 托盘菜单补上这张新便签
-    schedule_tray_refresh(&app);
+    schedule_tray_refresh(app);
     Ok(note.id)
 }
 
 #[tauri::command]
 fn delete_note(app: AppHandle, window: Window, state: State<'_, AppState>) -> Result<(), String> {
     let id = require_note_id(&window)?;
-    let label = window.label().to_string();
+    delete_note_via(&app, &state, &id)
+}
+
+/// 删除一张便签（数据 + 窗口 + 托盘刷新）。UI 命令与 `--delete-note` 共用这一条路径。
+fn delete_note_via(app: &AppHandle, state: &AppState, id: &str) -> Result<(), String> {
+    let id_owned = id.to_string();
     let remaining = state.update(move |s| {
-        s.notes.retain(|n| n.id != id);
+        s.notes.retain(|n| n.id != id_owned);
         s.notes.len()
     })?;
 
-    if let Some(webview) = app.get_webview_window(&label) {
+    if let Some(webview) = app.get_webview_window(&note_label(id)) {
         let _ = webview.destroy();
     }
 
     // 被删除的便签要从托盘列表里消失
-    schedule_tray_refresh(&app);
+    schedule_tray_refresh(app);
 
     if remaining == 0 {
         // 最后一张便签被删除：刷盘后退出，避免留下一个没有任何便签的托盘进程
@@ -735,6 +773,141 @@ fn capture_geometry(app: &AppHandle, label: &str) {
     });
 }
 
+// ---------------------------------------------------------------- 调试命令行
+//
+// `--dump` / `--check` / `--set-pin` / `--new-note` 都是**隐藏**参数，只给
+// `scripts/check-zorder.ps1` 与手工排查用，UI 里没有入口。
+//
+// 两条执行路径共用下面的 `run_cli`：
+// 1. 当前没有实例在跑 → 本次进程自己启动应用，等所有便签窗口建好之后在 `setup` 末尾执行；
+// 2. 已经有实例在跑 → 新进程把 argv 交给单实例插件，由**已运行的实例**执行后自己退出。
+//    所以"另开一个进程"对用户是透明的，但退出码拿不到（插件统一 exit(0)），
+//    脚本一律以 %TEMP% 下的结果文件为准。
+
+/// 本次进程启动时携带的诊断命令（没有则为 None）
+static LAUNCH_CLI: std::sync::OnceLock<Option<cli::Cli>> = std::sync::OnceLock::new();
+
+/// 执行一次诊断命令。
+///
+/// `forwarded = true` 表示 argv 由单实例插件转发而来，此刻正处在
+/// `WM_COPYDATA` 的窗口过程里（主线程 + 消息处理中）：只有"建窗口"必须挪到
+/// 异步任务里，其余采集/断言都是纯读，当场做即可。
+fn run_cli(app: &AppHandle, command: &cli::Cli, forwarded: bool) {
+    if command.new_note {
+        if forwarded {
+            let app = app.clone();
+            let rest = command.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = create_note_via(&app) {
+                    eprintln!("[diag] --new-note 失败：{err}");
+                }
+                run_cli_after_note(&app, &rest);
+            });
+            return;
+        }
+        if let Err(err) = create_note_via(app) {
+            eprintln!("[diag] --new-note 失败：{err}");
+        }
+    }
+    run_cli_after_note(app, command);
+}
+
+/// `--new-note` 之后的部分：删除便签 → 切置顶 → dump / check
+fn run_cli_after_note(app: &AppHandle, command: &cli::Cli) {
+    if let Some(id) = command.delete_note.clone() {
+        let result = app
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态尚未就绪".to_string())
+            .and_then(|state| delete_note_via(app, &state, &id));
+        let line = match result {
+            Ok(()) => format!("已删除便签 {id}"),
+            Err(err) => format!("--delete-note 失败：{err}"),
+        };
+        println!("[diag] {line}");
+        diagnostics::console_notice(&line);
+    }
+
+    if let Some((target, pinned)) = command.set_pin.clone() {
+        let result = resolve_pin_target(app, &target)
+            .and_then(|id| apply_pinned_for(app, &id, pinned).map(|actual| (id, actual)));
+        let line = match result {
+            Ok((id, actual)) => format!("已设置置顶：note {id} pinned={pinned} topmost={actual}"),
+            Err(err) => format!("--set-pin 失败：{err}"),
+        };
+        println!("[diag] {line}");
+        diagnostics::console_notice(&line);
+    }
+
+    if !command.check && !command.dump {
+        return;
+    }
+
+    let snapshot = diagnostics::collect(app);
+    let dump_path = command
+        .out
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(diagnostics::default_dump_path);
+    let mut exit_code = 0;
+
+    if command.check {
+        match diagnostics::run_check(&snapshot, &dump_path) {
+            Ok(outcome) => {
+                let summary = if outcome.ok {
+                    format!("PASS {}/{}", outcome.passed, outcome.total)
+                } else {
+                    let bad: Vec<String> = outcome
+                        .checks
+                        .iter()
+                        .filter(|item| item.status == "fail")
+                        .map(|item| format!("{}：{}", item.name, item.detail))
+                        .collect();
+                    format!("FAIL: {}", bad.join("；"))
+                };
+                println!("[diag] {summary}");
+                diagnostics::console_notice(&summary);
+                if !outcome.ok {
+                    exit_code = 1;
+                }
+            }
+            Err(err) => {
+                eprintln!("[diag] 写入检查结果失败：{err}");
+                exit_code = 2;
+            }
+        }
+    } else {
+        match diagnostics::write_dump(&snapshot, &dump_path) {
+            Ok(()) => {
+                let line = format!("已写入 {}", dump_path.display());
+                println!("[diag] {line}");
+                diagnostics::console_notice(&line);
+            }
+            Err(err) => eprintln!("[diag] --dump 失败：{err}"),
+        }
+    }
+
+    if command.exit_after_dump {
+        if let Some(state) = app.try_state::<AppState>() {
+            let _ = state.flush();
+        }
+        app.exit(exit_code);
+    }
+}
+
+/// `--set-pin auto` 的目标：z 序最靠前的那张便签；一张窗口都没有就退化成数据里第一张
+fn resolve_pin_target(app: &AppHandle, target: &str) -> Result<String, String> {
+    if target != "auto" {
+        return Ok(target.to_string());
+    }
+    let snapshot = diagnostics::collect(app);
+    snapshot
+        .windows
+        .first()
+        .map(|window| window.note_id.clone())
+        .or_else(|| snapshot.notes.first().map(|note| note.id.clone()))
+        .ok_or_else(|| "当前没有可操作的便签".to_string())
+}
+
 // ---------------------------------------------------------------- 托盘
 
 /// 单实例锁回调：第二次双击 exe 时唤回已有便签。
@@ -849,6 +1022,18 @@ fn flush_and_exit(app: &AppHandle) {
     app.exit(0);
 }
 
+/// 在资源管理器里选中这个文件（托盘「诊断：导出窗口状态」用）。
+///
+/// `/select,` 后面的整串算一个参数，带空格的路径不需要自己加引号。
+fn reveal_in_explorer(path: &Path) {
+    if let Err(err) = std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+    {
+        eprintln!("[diag] 打开资源管理器失败：{err}");
+    }
+}
+
 /// 托盘菜单里最多列出的便签数，超出的用「…另有 N 张」占位
 const MAX_TRAY_NOTES: usize = 20;
 
@@ -900,6 +1085,15 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let show_item = MenuItem::with_id(app, "show_all", "显示全部便签", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, "hide_all", "隐藏全部便签", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    // 调试入口：导出窗口状态（极少数场景才用，所以放在最底下、单独一条分隔线之后）
+    let diag_separator = PredefinedMenuItem::separator(app)?;
+    let diag_item = MenuItem::with_id(
+        app,
+        "diag_dump",
+        "诊断：导出窗口状态",
+        true,
+        None::<&str>,
+    )?;
 
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
     if !note_items.is_empty() {
@@ -915,6 +1109,8 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     items.push(&show_item);
     items.push(&hide_item);
     items.push(&quit_item);
+    items.push(&diag_separator);
+    items.push(&diag_item);
 
     Menu::with_items(app, &items)
 }
@@ -1031,6 +1227,20 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 }
                 "hide_all" => hide_all_notes(app),
                 "quit" => flush_and_exit(app),
+                "diag_dump" => {
+                    // 只读状态、几十毫秒就能跑完，直接在主线程做（托盘回调本来就在主线程）
+                    match diagnostics::write_dump(
+                        &diagnostics::collect(app),
+                        &diagnostics::default_dump_path(),
+                    ) {
+                        Ok(()) => {
+                            let path = diagnostics::default_dump_path();
+                            println!("[diag] 已写入 {}", path.display());
+                            reveal_in_explorer(&path);
+                        }
+                        Err(err) => eprintln!("[tray] 导出窗口状态失败：{err}"),
+                    }
+                }
                 _ => {}
             }
         })
@@ -1093,11 +1303,32 @@ fn resolve_data_dir(default_dir: &Path) -> (PathBuf, bool) {
 // ---------------------------------------------------------------- entry
 
 pub fn run() {
+    // 命令行只解析一次：没有已运行实例时，命令要等 setup 里所有窗口建完才执行
+    let argv: Vec<String> = std::env::args().collect();
+    let _ = LAUNCH_CLI.set(cli::parse(&argv));
+
     tauri::Builder::default()
         // 单实例锁必须是「第一个注册」的插件（插件自身的硬性要求）。
         // 第二次双击 exe 时：新进程由插件直接退出，回调在已存在的实例里把便签唤回前台。
         // 注意按应用 identifier 判定，所以便携模式的两份拷贝同机运行也只会有一份活着。
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            // 诊断参数（--dump / --check / --set-pin / --new-note）：
+            // **只执行命令，不唤回便签**——唤回会 set_focus 把窗口抬起来，
+            // 正好把待断言的层级搞乱。回调就在已运行实例的主线程上（WM_COPYDATA），
+            // 所以可以直接同步执行。
+            if let Some(mut command) = cli::parse(&argv) {
+                // `--out` 的相对路径按"发起命令的那个进程"的 cwd 解析；
+                // 已运行实例自己的 cwd 可能完全不同（比如从资源管理器启动）
+                if let Some(out) = command.out.clone() {
+                    if Path::new(&out).is_relative() {
+                        command.out = Some(Path::new(&cwd).join(out).display().to_string());
+                    }
+                }
+                let app = app.clone();
+                run_cli(&app, &command, true);
+                return;
+            }
+
             let app = app.clone();
             // 回调不保证在主线程，窗口操作统一挪回主线程执行
             let _ = app.clone().run_on_main_thread(move || {
@@ -1153,6 +1384,7 @@ pub fn run() {
             app.manage(AppState {
                 store: Mutex::new(data),
                 path: store_path,
+                portable,
                 geom_gen: Mutex::new(HashMap::new()),
                 tray_menu: Mutex::new(None),
             });
@@ -1173,6 +1405,12 @@ pub fn run() {
             }
             if let Some(window) = last_window {
                 let _ = window.set_focus();
+            }
+
+            // 本次启动带了诊断参数（且没有已运行实例）：所有便签窗口都已建好，
+            // 现在采集才不会是半成品。放在 setup 最后一行，不早于任何窗口创建。
+            if let Some(command) = LAUNCH_CLI.get().and_then(|slot| slot.as_ref()) {
+                run_cli(&handle, command, false);
             }
 
             Ok(())

@@ -36,6 +36,20 @@
 //!    修法：`park_behind` 加 `SWP_NOOWNERZORDER`；并且在应用完 pinned 之后回读
 //!    exstyle 校验，不一致就重试一次（见 `apply_pinned_verified`）。
 //!
+//! ## 0.4.0 修正：BUG 3「取消一张的置顶，另一张跟着掉出置顶层」
+//!
+//! `--check` 上线后第一次跑回归就抓到的第三个坑：两张便签都置顶（都是 0x40118）时，
+//! 把其中一张取消置顶，**另一张的 `WS_EX_TOPMOST` 也会被清掉**（实测 0x40118 -> 0x40110），
+//! 于是数据里 pinned=true、窗口却掉回普通层——正是第 1 条不变量要抓的那种状态。
+//!
+//! 根因不在我们自己的代码，而在 tao：`set_always_on_top(false)` 走
+//! `SetWindowPos(hwnd, HWND_NOTOPMOST, …, SWP_ASYNCWINDOWPOS|SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)`
+//! （见 tao 0.37 的 `window_state.rs`），**没有 `SWP_NOOWNERZORDER`**，
+//! 于是和 BUG 2 同一个机制（owner 组连带）把兄弟窗口的 TOPMOST 位带走了。
+//! tao 的调用我们改不了，所以改成"事后修复"：取消置顶的动作做完之后，
+//! 把所有**本该置顶**却丢了 TOPMOST 的兄弟窗口重新钉回去（`repair_pinned_topmost`，
+//! 不激活、不改尺寸位置、只补标志位）。
+//!
 //! ## 多窗口
 //! 每张便签是独立窗口，`install` 会对每个窗口各调一次；图钉状态按 HWND 分别记录，
 //! 否则一张便签置顶会把所有便签都当成"用户已置顶"，新建窗口就不再垫底。
@@ -243,6 +257,8 @@ pub fn install<R: Runtime>(window: &WebviewWindow<R>, pinned: bool) {
     verify_and_fix_topmost(window, pinned);
     // 新建窗口的创建/显示本身也可能带起兄弟窗口，最后统一压一遍
     park_siblings_behind(hwnd);
+    // 顺带补回被连带清掉的兄弟 TOPMOST 位（BUG 3 的同一机制）
+    repair_pinned_topmost(hwnd);
     debug_dump("install: 结束");
 }
 
@@ -275,6 +291,10 @@ pub fn set_user_pinned<R: Runtime>(window: &WebviewWindow<R>, pinned: bool) -> b
     //    一起抬到普通层最前面，不补这一刀就会"点 A 的图钉，B 窜到前台应用之上"。
     //    必须放在最后，因为第 2 步的重试也可能带起兄弟窗口。
     park_siblings_behind(hwnd);
+
+    // 3.5) BUG 3 的补丁：tao 取消置顶时用的 HWND_NOTOPMOST 不带 SWP_NOOWNERZORDER，
+    //      会把兄弟置顶窗口的 TOPMOST 位一起带走，这里回读并按需补回去。
+    repair_pinned_topmost(hwnd);
 
     // 4) 以最终的真实 exstyle 为准回报（不轮询，只在切换路口读一次）
     let actual = is_always_on_top(window);
@@ -391,6 +411,41 @@ pub fn park_siblings_after_activation<R: Runtime>(activated: &WebviewWindow<R>) 
     debug_dump("激活前");
     park_siblings_behind(HWND(raw.0 as *mut core::ffi::c_void));
     debug_dump("激活后补垫");
+}
+
+/// 把"本该置顶却丢了 `WS_EX_TOPMOST`"的兄弟窗口重新钉回置顶层（BUG 3 的补丁）。
+///
+/// 判定依据是 `USER_PINNED` 里的用户意图（`install` / `set_user_pinned` 都会写），
+/// 所以只补真正的置顶窗口，不会把用户取消掉的置顶又钉回去。
+/// 全程带 `SWP_NOACTIVATE | SWP_NOOWNERZORDER`，不抢焦点、不牵动 owner 组。
+fn repair_pinned_topmost(keep: HWND) {
+    let progman = find_progman();
+    for (hwnd, title) in collect_note_windows() {
+        if hwnd == keep {
+            continue;
+        }
+        let owner = unsafe { GetWindow(hwnd, GW_OWNER) }.unwrap_or_default();
+        if progman.is_none() || Some(owner) != progman {
+            continue;
+        }
+        if !is_user_pinned(hwnd) || ex_style(hwnd) & WS_EX_TOPMOST.0 as isize != 0 {
+            continue;
+        }
+        if debug_enabled() {
+            eprintln!("[zorder] 修复兄弟窗口 {title} 的 TOPMOST 位（BUG 3）");
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
+    }
 }
 
 /// 安全地把窗口从置顶层撤下来（不做激活、不影响兄弟窗口）

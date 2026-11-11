@@ -31,6 +31,8 @@ rust-sticky-notes/
 ├── tsconfig.json
 ├── LICENSE                     # MIT
 ├── scripts/gen_icon.py         # 用 Pillow 生成 1024px 源图标（一次性脚本）
+├── scripts/measure-startup.ps1 # 启动耗时测量
+├── scripts/check-zorder.ps1    # **窗口层级回归断言**（--dump / --check 驱动，见「调试工具」）
 ├── src/                        # 前端
 │   ├── main.tsx
 │   ├── App.tsx                 # 单窗口状态编排 + 防抖保存（每个窗口只管自己那张便签）
@@ -51,8 +53,10 @@ rust-sticky-notes/
     ├── icons/                  # 由 `tauri icon` 生成
     └── src/
         ├── main.rs
-        ├── lib.rs              # 命令 + 每便签窗口 + 托盘 + 几何持久化
+        ├── lib.rs              # 命令 + 每便签窗口 + 托盘 + 几何持久化 + 调试命令行分发
         ├── store.rs            # store.json v2 读写（v1 迁移 + 原子替换）
+        ├── cli.rs              # --dump / --check / --set-pin 等隐藏调试参数解析
+        ├── diagnostics.rs      # 窗口/数据快照（JSON）+ 6 条层级不变量断言
         └── win_desktop_pin.rs  # 抵抗 Win+D（owner = Progman 桌面绑定）
 ```
 
@@ -139,6 +143,11 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 - 退出：托盘退出、设置面板退出、`RunEvent::ExitRequested` 都会先 flush 再退出
 - **抵抗 Win+D**：每个便签窗口各自调用 `win_desktop_pin::install(&window, pinned)`（机制不变，
   见下文「抵抗 Win+D」一节）；取消图钉时调用 `set_user_pinned(&window, false)` 垫回其它窗口之下
+- **可观测 + 可断言（0.4.0）**：隐藏命令行 `--dump`（窗口 + 数据状态导成 JSON）、
+  `--check`（跑 6 条层级不变量，写 `%TEMP%\sticky-check.txt/json`）、
+  `--set-pin <id|auto> <true|false>`（脚本驱动置顶，和 UI 同一条后端路径）；
+  另有一键回归脚本 `scripts/check-zorder.ps1`。详见「层级契约」与「调试工具」两节
+- **托盘诊断入口**：托盘菜单最下方「诊断：导出窗口状态」→ 导出 dump 并用资源管理器选中该文件
 
 ## 数据文件与迁移
 
@@ -326,6 +335,18 @@ Node 24.21.0、WebView2 157、3840×2160 @200% DPI。
 - **每日备份**：当天首次写盘生成 `store.20261109.json`；预置 9 份旧备份后再落盘，只保留最近 7 份
   （最旧的 3 份被删除）
 
+### 0.4.0 诊断基建（`--dump` / `--check` / `scripts/check-zorder.ps1`，2026-11-11）
+
+这一节不是"看了一眼截图觉得对"，而是脚本自证：
+
+- `src-tauri\target\release\rust-sticky-notes.exe --check` → `PASS 6/6`，六条不变量逐条见
+  `%TEMP%\sticky-check.txt`（前台是便签自己的窗口时第 3 条会 SKIP，脚本里会先把记事本拉到前台再断言）
+- `pwsh -File scripts\check-zorder.ps1` → **18/18 通过**，耗时约 **4.7s**（含一次关进程重启）
+- 顺带抓到并修掉第三个层级 bug（取消置顶把兄弟窗口的 `WS_EX_TOPMOST` 一起清掉），
+  见「层级与置顶」的 BUG 3
+- 用外部脚本恶意清掉某个窗口的 `WS_EX_TOPMOST` 后重跑，第 1 条不变量立刻 FAIL，
+  失败上下文会打印原始字段（`exstyle` / `owner_class` / `z` / `rect`），验证了"坏状态一定能被判出来"
+
 ## 启动速度怎么测
 
 ```powershell
@@ -485,6 +506,116 @@ src-tauri\target\release\rust-sticky-notes.exe
   所以激活后的补垫（`park_siblings_behind`）是必须的，不能省；
 - 由于便签同属一个 owner 组，极端情况下（其它软件也在操作 owner = Progman 的窗口）
   仍可能有短暂的层级抖动，补垫逻辑会在下一个层级操作时收敛回来。
+
+## 层级契约
+
+这个应用的窗口层级**必须**满足下面 6 条。它们是 `--check` 的判定依据，也是任何改层级代码的
+PR 合并前必须满足的条件——**改 `win_desktop_pin.rs` / 图钉 / 折叠 / 新建窗口的 PR，
+请先跑一次 `pwsh -File scripts\check-zorder.ps1`，18/18 通过才算完**。
+
+1. **置顶一致**：`store.json` 里 `pinned = true` 的便签，其窗口必须带 `WS_EX_TOPMOST`；
+   `pinned = false` 的必须不带。两者任何一边单独变化都算违约（0.3.1 的 BUG 2 就是这个状态）。
+2. **owner 正确**：每个便签窗口的 owner（`GWLP_HWNDPARENT`）类名必须是 `Progman`。
+   这是 Win+D 抗性的前提，owner 一旦丢掉，按 Win+D 便签就会被桌面盖住。
+3. **不越界**：未置顶便签窗口的 z 序必须**比当前前台窗口更靠后**（z 值更大），
+   也就是不能被后台便签压住前台应用。前台窗口本身是便签时这条不适用（跳过）。
+4. **置顶在最前**：所有置顶窗口的 z 都小于所有未置顶窗口的 z——置顶的在最上层，
+   没置顶的一律垫在下面，不存在"半高不低"的夹心状态。
+5. **几何一致**：展开态便签窗口的 `rect` 宽高必须等于 `bounds` 宽高（容差 2px 物理像素）；
+   折叠态跳过（`bounds` 存的是展开态几何，窗口却是 48 逻辑像素高，本来就不相等）。
+6. **窗口与数据对得上**：`store.json` 的 `notes[]` 与运行中的便签窗口 id 集合必须一一对应，
+   每个 id 恰好一个窗口、不多不少。`visible=false`（启动时被隐藏、没建窗口）的便签允许没有窗口。
+
+判定口径（脚本依赖）：
+
+- `z` 是 `EnumWindows` 枚举到的**全体可见顶层窗口**序号，`0 = 最前`；
+  不在该枚举里的窗口（隐藏 / 最小化到托盘）写 `null`；
+- 所有矩形都是**物理像素**（`--dump` 顶层有 `"units": "physical"`）；
+- `--check` 的 `PASS 6/6` 里，SKIP 也计入通过（例如前台恰好是便签自己），
+  但"场景断言"（脚本里把外部应用拉到前台的那些）要求对应条目必须是 `pass`，不允许靠 skip 蒙混。
+
+## 调试工具
+
+三个**隐藏**命令行参数（UI 里没有入口），全部通过单实例插件转发：另起一个进程时 argv 会被送进
+已运行的实例执行，所以"在正在跑的应用里执行一条命令"对用户是透明的。
+
+```powershell
+# 1) 导出窗口 + 数据状态（默认 %TEMP%\sticky-dump.json，可用 --out 改）
+src-tauri\target\release\rust-sticky-notes.exe --dump [--out <路径>]
+
+# 2) 跑 6 条不变量断言（写 %TEMP%\sticky-check.txt 和 sticky-check.json，顺带写一份 dump）
+src-tauri\target\release\rust-sticky-notes.exe --check
+
+# 3) 脚本驱动置顶（auto = z 序最靠前的那张；和 UI 图钉走同一条后端路径）
+src-tauri\target\release\rust-sticky-notes.exe --set-pin <note_id|auto> <true|false>
+
+# 辅助（脚本内部用）
+--new-note                  按 UI 路径新建一张便签
+--delete-note <note_id>     删除指定便签（清理脚本自己建的临时便签）
+--exit-after-dump           dump/check 完成后退出进程，退出码 = 断言结果（0 通过 / 1 有违反）
+```
+
+**没有实例在跑时**：会正常启动应用 → 等所有便签窗口创建完成 → 再执行命令，不会 dump 出半成品；
+执行完不退出（除非显式 `--exit-after-dump`）。
+**已经有实例在跑时**：命令由已运行实例执行，新进程立刻退出（插件统一 `exit(0)`），
+所以**退出码不可信，一律以结果文件内容为准**。
+
+`--dump` 的 JSON 契约（脚本按字段名解析，改名字要同步改 `scripts/check-zorder.ps1`）：
+
+```json
+{
+  "timestamp": "2026-11-11T20:09:29+08:00",
+  "pid": 32332,
+  "dpi_awareness": "per-monitor-v2",
+  "store_path": "C:\\Users\\...\\store.json",
+  "portable": false,
+  "units": "physical",
+  "foreground": { "hwnd": 133126, "class": "Tauri Window", "title": "便签", "is_ours": true, "z": 23 },
+  "notes": [
+    { "id": "7dc71de7-...", "title": "测试便签", "pinned": true, "collapsed": false,
+      "visible": true, "bounds": { "x": 2062, "y": 577, "width": 640, "height": 840 } }
+  ],
+  "windows": [
+    { "label": "note-7dc71de7-...", "note_id": "7dc71de7-...", "hwnd": 198458,
+      "exstyle": "0x40118", "topmost": true, "noactivate": false, "toolwindow": false,
+      "owner_hwnd": 65974, "owner_class": "Progman", "class": "Tauri Window", "title": "测试便签",
+      "visible": true, "iconic": false, "focused": false,
+      "rect": { "x": 2062, "y": 577, "w": 640, "h": 840 },
+      "client": { "w": 640, "h": 840 }, "z": 1, "z_total": 25 }
+  ],
+  "violations": []
+}
+```
+
+- `exstyle` 是十六进制字符串，另把 `WS_EX_TOPMOST(0x8)` / `WS_EX_NOACTIVATE(0x08000000)` /
+  `WS_EX_TOOLWINDOW(0x80)` 解成 `topmost` / `noactivate` / `toolwindow`，脚本不用自己做位运算；
+- `owner_class` 用 `GetClassNameW` 取，用来确认 owner 还是 `Progman`（owner 为 0 时 `owner_hwnd=0`、
+  `owner_class=""`）；
+- `notes[]` 比数据文件多一个 `visible` 字段：第 6 条不变量要靠它区分"隐藏且没有窗口"与"本该有窗口却没有"；
+- `violations` 与 `--check` 的失败条目同源，空数组表示 6 条全过。
+
+**出问题时的推荐流程**：先 `--dump`，再看 `sticky-check.txt`，把 `violations` + 对应窗口那几行
+（`label / exstyle / topmost / owner_class / z / rect`）贴出来。这几个字段足够定位
+"是不是丢了 TOPMOST""owner 还是不是 Progman""是不是被兄弟窗口顶上去了"三类问题，
+比截图靠谱得多。
+
+**一键回归**
+
+```powershell
+npm run tauri build -- --no-bundle
+pwsh -File scripts\check-zorder.ps1                  # 5 个场景 / 18 条断言 / ~5 秒
+pwsh -File scripts\check-zorder.ps1 -SkipRestart     # 不重启应用（更快，~2.5 秒）
+pwsh -File scripts\check-zorder.ps1 -Exe <别的 exe>  # 指到别的构建产物
+```
+
+脚本做的事：确保有 ≥2 张便签（不足会自动 `--new-note` 一张，结束时删掉）→ 把记事本拉到前台 →
+`--check` 断言"未置顶便签没压住前台" → `--set-pin auto true/false` 各断言一次 →
+两张一钉一不钉切换 2 轮，断言"未置顶那张的 z 始终在前台之后" → 关进程重启，断言置顶状态与
+`store.json` 一致。失败时打印 dump 里的相关原始字段并返回非 0，临时文件保留（`%TEMP%\sticky-*`），
+成功则删除。它只关自己拉起来的记事本、只恢复自己改过的置顶状态，不会动用户的便签内容。
+
+**层级日志**：设置环境变量 `STICKY_DEBUG_ZORDER=1` 后，每次层级操作都会打印每个便签窗口的
+`exstyle` / `WS_EX_TOPMOST` / owner / z 索引（默认关闭，不影响正常使用）。
 
 ## 已知限制
 
