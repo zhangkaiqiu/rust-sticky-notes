@@ -221,7 +221,10 @@ fn place(hwnd: HWND, after: HWND) {
 
 /// 创建窗口后调一次（要在 `show()` 之后、`set_focus()` 之前）：登记状态、绑定 owner、重排。
 ///
-/// 未置顶的便签一律从沉底开始：新建窗口默认在最前面，不垫底的话一开机就盖住浏览器。
+/// 这里写入的是**开机默认态**：未置顶的便签从沉底开始（否则新建窗口默认在最前面）。
+/// 紧接着建窗 / `show()` / `set_focus()` 会触发一串 `Focused(true)`，把它们记成
+/// `raised`——**这是预期的**：用户刚启动应用，便签出现在最前面很正常。用户切去别的
+/// 应用后，前台应用照样能盖住它（靠的是 owner = Progman 的层级关系，不是 TOPMOST）。
 pub fn install<R: Runtime>(window: &WebviewWindow<R>, pinned: bool) {
     let Ok(raw) = window.hwnd() else {
         eprintln!("[desktop-bind] 取窗口句柄失败，跳过桌面绑定");
@@ -230,9 +233,7 @@ pub fn install<R: Runtime>(window: &WebviewWindow<R>, pinned: bool) {
     let hwnd = HWND(raw.0 as *mut core::ffi::c_void);
     set_state(hwnd, |state| {
         state.pinned = pinned;
-        if pinned {
-            state.raised = true;
-        }
+        state.raised = pinned;
     });
 
     let Some(progman) = find_progman() else {
