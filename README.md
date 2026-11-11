@@ -57,7 +57,7 @@ rust-sticky-notes/
         ├── store.rs            # store.json v2 读写（v1 迁移 + 原子替换）
         ├── cli.rs              # --dump / --check / --set-pin 等隐藏调试参数解析
         ├── diagnostics.rs      # 窗口/数据快照（JSON）+ 6 条层级不变量断言
-        └── win_desktop_pin.rs  # 抵抗 Win+D（owner = Progman）+ 声明式层级重排 reconcile()
+        └── win_desktop_pin.rs  # 抵抗 Win+D（owner = Progman）+ 图钉，每个窗口只操作自己
 ```
 
 ## 运行
@@ -109,7 +109,7 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
   - 设置面板里的滑块拖动实时预览，停手 300ms 后落盘
 - **图钉**：置顶时图钉整体旋转 45° 并加深颜色（无外圈、无底色块），未置顶时竖直淡色、
   hover 变深；每张便签的 `pinned` 状态独立保存。切换置顶是**幂等**的：状态没变时不动层级。
-  实际改层级统一走 `win_desktop_pin::reconcile()`（不再调 tao 的 `set_always_on_top`）：
+  实际改层级统一走 `win_desktop_pin`（不再调 tao 的 `set_always_on_top`）：
   取消置顶**不沉降**（留在原处，只是不再压住别的置顶内容），且不会连累兄弟便签；
   唤回路径也只对需要显示的窗口 `show()`
 - 设置面板（便签内小浮层，不另开窗口）：配色 / 字号 / 主题 / 透明度 / 置顶 /
@@ -147,7 +147,7 @@ NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 - 退出：托盘「退出应用」、`RunEvent::ExitRequested` 都会先 flush 再退出
 - **抵抗 Win+D**：每个便签窗口各自调用 `win_desktop_pin::install(&window, pinned)`（机制不变，
   见下文「抵抗 Win+D」一节）；图钉切换调用 `set_user_pinned(&window, false)`，
-  它只改状态位再 `reconcile()`，取消置顶不沉降、也不连累兄弟窗口
+  它只对自己调一次 `SetWindowPos`，取消置顶不沉降、也不连累兄弟窗口
 - **可观测 + 可断言（0.4.0）**：隐藏命令行 `--dump`（窗口 + 数据状态导成 JSON）、
   `--check`（跑 6 条层级不变量，写 `%TEMP%\sticky-check.txt/json`）、
   `--set-pin <id|auto> <true|false>`（脚本驱动置顶，和 UI 同一条后端路径）；
@@ -352,13 +352,13 @@ Node 24.21.0、WebView2 157、3840×2160 @200% DPI。
 - `src-tauri\target\release\rust-sticky-notes.exe --check` → `PASS 6/6`，六条不变量逐条见
   `%TEMP%\sticky-check.txt`（前台是便签自己的窗口时第 3 条会 SKIP，脚本里会先把记事本拉到前台再断言）
 - `pwsh -File scripts\check-zorder.ps1` → **18/18 通过**，耗时约 **4.7s**（含一次关进程重启）
-  （0.4.2 把脚本扩到 7 个场景 / 28 条断言，见下一节）
+  （0.4.3 把脚本扩到 8 个场景 / 31 条断言，见下一节）
 - 顺带抓到并修掉第三个层级 bug（取消置顶把兄弟窗口的 `WS_EX_TOPMOST` 一起清掉），
   见「层级与置顶」的 BUG 3
 - 用外部脚本恶意清掉某个窗口的 `WS_EX_TOPMOST` 后重跑，第 1 条不变量立刻 FAIL，
   失败上下文会打印原始字段（`exstyle` / `owner_class` / `z` / `rect`），验证了"坏状态一定能被判出来"
 
-### 0.4.1 层位意图（Sunk / Raised，2026-11-11）
+### 0.4.1 层位意图（Sunk / Raised，2026-11-11；0.4.3 已移除）
 
 - 取消置顶不再沉降：`--set-pin <id> false` 之后 dump 里该窗口 `topmost=false`、`raised=true`，
   且 z **仍小于**记事本 z（以前会被 `HWND_BOTTOM` 踩到所有窗口之下）
@@ -377,6 +377,25 @@ Node 24.21.0、WebView2 157、3840×2160 @200% DPI。
 - `powershell -File scripts\check-zorder.ps1` → **28/28 通过**，连跑 3 次结果完全一致
 - 菜单职责剥离：「开机自启」「退出应用」从便签设置面板移到托盘菜单（自启带勾选态），
   删除随之无用的 `set_autostart` / `quit_app` 命令与 `PowerIcon`
+
+### 0.4.3 一个窗口只操作自己（2026-11-11）
+
+用户报障原话：「A 置顶、B 不置顶，最顶层是浏览器；我只要一点 B（不是点图钉，是点任何位置），
+B 就会拉到前台」——以及更根本的要求：**对 A 的所有操作都不该改变 B 的任何状态**。
+
+- 根因是 0.4.2 的全量 `reconcile()` + 泄漏的 `raised` 状态位：每次点 A 都重写所有窗口 z 序，
+  B 只要残留 `raised=true`（取消置顶/被点中都会写进去，且没有路径清回 false）就被顶上来。
+  实测把 B 的 `raised` 强制置 false 后点 A，B 纹丝不动 → 确认是我们的代码在拉它
+- `win_desktop_pin.rs` 从 434 行减到 268 行：删掉状态表、`Mutex`、`reconcile()`、
+  三段式排序、`note_activated()`；`install()` 只绑 owner 不动 z 序；
+  `set_user_pinned()` 只对自己调一次 `SetWindowPos`
+- 唯一保留的"碰别人"是系统强加的激活连带：`Focused(true)` 后由 `settle_siblings()`
+  把「未置顶且非前景」的便签垫回底部，分 4 次补到 110ms（实测当场补无效，
+  会被系统随后的连带覆盖；单次 90ms 只在最终状态对，前 2 次采样仍是错的）
+- `--dump` 删除 `raised` 字段，不变量 3「不越界」不再有 raised 例外
+- 真实鼠标点击 A 后以 15ms 采样 20 次，B 的 z 序号一次都没变（0/20）
+- `powershell -File scripts\check-zorder.ps1` → **31/31 通过**（新增「点击隔离」场景），
+  连跑 3 次结果完全一致
 
 ## 启动速度怎么测
 
@@ -484,18 +503,20 @@ src-tauri\target\release\rust-sticky-notes.exe
    不带 `SWP_NOOWNERZORDER` 就会牵连其它成员——清掉兄弟的 `WS_EX_TOPMOST`
    （实测 `0x40118` → `0x40110`），或把兄弟一起抬到普通层最前。
    所以**所有** `SetWindowPos` 都必须带这个标志。
-2. **激活（点击）会让整组兄弟被抬到普通层最前，这条不受 `SWP_NOOWNERZORDER` 约束。**
-   只能事后重排——`Focused(true)` 之后调 `note_activated()` 再 `reconcile()` 一次。
+2. **激活（点击）会让整组兄弟被抬到普通层最前，这条不受 `SWP_NOOWNERZORDER` 约束，
+   也无法阻止。** 只能事后把不该动的兄弟放回去（`settle_siblings`）。实测：A 置顶、
+   B 沉底 z=25、记事本在前台 z=4，仅激活 A，B 就被系统搬到 z=4。
+   而且**当场补垫无效**（会被系统随后的连带覆盖），要分几次补到 110ms 左右才稳定——
+   见 `SETTLE_PASSES_MS`。
 3. **tao 的 `set_always_on_top(false)` 走 `HWND_NOTOPMOST` 且不带 `SWP_NOOWNERZORDER`，
    而且带 `SWP_ASYNCWINDOWPOS`（异步）。** 它既把窗口顶到普通层最前，又牵动整组，
    晚到的异步消息还会覆盖掉"事后再补一刀"的结果。**0.4.2 起完全不调它**，
-   自己用 `reconcile()` 做同一步。
+   自己用 `place()` 做同一步。
 4. **只有 `HWND_NOTOPMOST` 会清 `WS_EX_TOPMOST`**，`HWND_TOP` / `HWND_BOTTOM` 不会。
-   所以"取消置顶"这一步必须显式走 `HWND_NOTOPMOST`（`reconcile` 第 1 步），
-   再靠后面的分段重排把它放回普通层该在的位置。
+   所以"取消置顶"必须显式走 `HWND_NOTOPMOST`。
 
 排查开关：环境变量 `STICKY_DEBUG_ZORDER=1` 会让每次重排打印每个窗口的
-`pinned` / `raised` / `topmost` / `exstyle`，默认关闭。
+`topmost` / `exstyle` 等字段，默认关闭。
 
 ## 层级契约
 
@@ -509,8 +530,6 @@ PR 合并前必须满足的条件——**改 `win_desktop_pin.rs` / 图钉 / 折
    这是 Win+D 抗性的前提，owner 一旦丢掉，按 Win+D 便签就会被桌面盖住。
 3. **不越界**：未置顶便签窗口的 z 序必须**比当前前台窗口更靠后**（z 值更大），
    也就是不能被后台便签压住前台应用。前台窗口本身是便签时这条不适用（跳过）。
-   **例外**（0.4.1 起）：该便签被标记为 `raised`（用户显式把它抬到前面）时，压住前台是
-   预期行为，这条记 SKIP 并写明"该便签已被显式抬到前面"。
 4. **置顶在最前**：所有置顶窗口的 z 都小于所有未置顶窗口的 z——置顶的在最上层，
    没置顶的一律垫在下面，不存在"半高不低"的夹心状态。
 5. **几何一致**：展开态便签窗口的 `rect` 宽高必须等于 `bounds` 宽高（容差 2px 物理像素）；
@@ -526,50 +545,40 @@ PR 合并前必须满足的条件——**改 `win_desktop_pin.rs` / 图钉 / 折
 - `--check` 的 `PASS 6/6` 里，SKIP 也计入通过（例如前台恰好是便签自己），
   但"场景断言"（脚本里把外部应用拉到前台的那些）要求对应条目必须是 `pass`，不允许靠 skip 蒙混。
 
-### 声明式重排：状态 + 一次 `reconcile()`（0.4.2 重写）
+### 一个窗口只操作自己（0.4.3）
+
+**铁律：对 A 的任何操作都不得改变 B。**
 
 0.4.1 之前是一堆"每条路径补一刀"的碎片补丁（`park_behind` / `park_siblings_behind` /
-`repair_pinned_topmost` 各在不同路径上打点）。补丁越多，漏掉的路径越多——用户报的
-「**点前面那张的取消置顶，后面那张会被瞬间拉上来**」就是这么漏出来的：取消置顶这条路径上
-既有人为的抬升、又有 taio/Windows 的 owner 组连带，事后没有重新沉降。
+`repair_pinned_topmost` 各在不同路径上打点）。0.4.2 改成"状态 + 一次全量 `reconcile()`"：
+每张便签在内存里记 `{pinned, raised}`，任何入口都只做"改状态 → 全量重排"。
 
-0.4.2 把整个文件**重写**成"状态 + 一次全量重排"：
+它算得没错，但**模型本身是错的**：每次点 A 都会给所有窗口重写一遍 z 序，于是只要某张兄弟
+残留了 `raised=true`，点 A 一下就被顶到浏览器前面。而 `raised` 会泄漏——除了 CLI 的
+`--sink-notes`，没有任何路径把它清回 false（取消置顶、被点中都会写 `true`）。用户报的
+「点 A 的文本区，B 就窜到前面」就是它。
 
-每个便签窗口只记两个语义状态位（`HashMap` 换成一张按注册顺序排列的 `Vec`）：
+0.4.3 把状态表和全量重排**整段删除**（706 → 268 行）：
 
-| 字段 | 含义 |
-| --- | --- |
-| `pinned` | 用户钉住了吗（⟺ 窗口带 `WS_EX_TOPMOST`） |
-| `raised` | 是否被显式抬到前面（托盘 / 被点中 / 刚取消置顶） |
+- **没有内存状态**：`pinned` 的唯一真相是窗口自己的 `WS_EX_TOPMOST`，每次操作前现读；
+- **没有全量重排**：`set_user_pinned` 只对自己调一次 `SetWindowPos`；
+- `install()` 只绑 owner，**不动 z 序**（新窗口本来就该在最前）；
+- 只剩一处"碰别人"，即系统强加的那一笔：激活 owner 组会把整组抬起来，事后由
+  `settle_siblings()` 把「未置顶且不是前景窗口」的便签垫回去（分 4 次补到 110ms，
+  因为当场补会被系统覆盖）。
 
-**任何入口都只做两件事：改状态 → 调 `reconcile()`。** 于是"操作 A 顺带改变了 B"变成一个
-单点可覆盖的问题：B 在重排里必然被放回它该在的位置。
+对外入口一共 5 个，语义都不再依赖任何状态位：
 
-**期望顺序（同一个 owner 组内，从前往后）：**
-
-1. `pinned = true` —— 置顶层，`HWND_TOPMOST`；
-2. `raised = true` 且未置顶 —— 普通层最前，`HWND_TOP`；
-3. 其余（沉底） —— 普通层最底，`HWND_BOTTOM`。
-
-段内前后按注册顺序（= `store` 顺序）。`reconcile()` 的做法：
-
-1. 先 `EnumWindows` 收集本进程所有便签窗口（类名 `Tauri Window` 且 owner = `Progman`）；
-2. 先把 `WS_EX_TOPMOST` 与 `pinned` 摆一致（取消置顶必须走 `HWND_NOTOPMOST`，
-   `HWND_TOP` / `HWND_BOTTOM` 不会清这个位）；
-3. 从**后段往前面段**依次 `SetWindowPos`：沉底段正序贴 `HWND_BOTTOM`，抬升段与置顶段
-   **倒序**贴 `HWND_TOP` / `HWND_TOPMOST`（贴顶时后贴的最终更靠前）；
-4. 全部带 `SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER`；
-5. 结束前回读每个窗口的 exstyle，`pinned` 与 `TOPMOST` 不一致才补第二轮（**不轮询**）。
-
-`reconcile()` 的调用点（只有这 5 个）：
-
-| 调用点 | 时机 | 先改什么状态 |
+| 入口 | 时机 | 动谁 |
 | --- | --- | --- |
-| `install()` | 窗口 `show()` 之后、`set_focus()` 之前；同时把 owner 设成 `Progman` | `pinned`，置顶的顺带 `raised` |
-| `set_user_pinned()` | UI 图钉 / 设置面板 / `--set-pin` | `pinned` + `raised = true`（取消置顶不沉降） |
-| `note_activated()` | `WindowEvent::Focused(true)`、程序 `set_focus()` 之后 | 这张 `raised = true`（激活连带由重排兜住） |
-| `raise_notes()` | 托盘左键 / `--raise-all` | 全部 `raised = true`，最后只 focus 第一张一次 |
-| `sink_all_notes()` | `--sink-notes`（回归复位） | 未置顶的全部 `raised = false` |
+| `install()` | 窗口 `show()` 后、`set_focus()` 前 | 只绑 owner，不动 z 序 |
+| `set_user_pinned()` | UI 图钉 / 设置面板 / `--set-pin` | **只有这一张** |
+| `settle_siblings()` | `WindowEvent::Focused(true)` 之后 | 只有其它**未置顶且非前景**的便签 |
+| `raise_notes()` | 托盘左键 / `--raise-all` | 全部（用户显式要求的全局动作） |
+| `sink_all_notes()` | `--sink-notes`（回归复位） | 全部未置顶的 |
+
+`raise_notes()` 会开一段 1.2 秒的静默期（`QUIET_UNTIL_MS`），否则紧随其后的
+`Focused(true)` 会把除焦点窗口外的便签又踩回去，用户看到"点托盘只上来一张"。
 
 **为什么彻底不用 tao 的 `set_always_on_top`**：它走
 `SetWindowPos(HWND_NOTOPMOST, …, SWP_ASYNCWINDOWPOS|SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)`，
@@ -610,7 +619,7 @@ src-tauri\target\release\rust-sticky-notes.exe --check
 # 3) 脚本驱动置顶（auto = z 序最靠前的那张；和 UI 图钉走同一条后端路径）
 src-tauri\target\release\rust-sticky-notes.exe --set-pin <note_id|auto> <true|false>
 
-# 4) 层位复位：把所有未置顶便签重新垫底、raised 复位为 false（回归脚本的前置动作）
+# 4) 层位复位：把所有未置顶便签重新垫底（回归脚本的前置动作）
 src-tauri\target\release\rust-sticky-notes.exe --sink-notes
 
 # 5) 抬升全部：等价于点托盘左键，所有便签抬到前台应用之上（脚本不用去点托盘）
@@ -622,7 +631,7 @@ src-tauri\target\release\rust-sticky-notes.exe --raise-all
 --exit-after-dump           dump/check 完成后退出进程，退出码 = 断言结果（0 通过 / 1 有违反）
 ```
 
-`--sink-notes` / `--raise-all` 是 0.4.1 新增的：前者把状态复位到"开机默认"（未抬升 + 垫底），
+`--sink-notes` / `--raise-all` 是 0.4.1 新增的：前者把所有未置顶便签垫回桌面常态，
 后者走与托盘左键完全相同的 `raise_notes` 路径。两者都可以再跟一个 `--dump`，
 这样脚本等结果文件刷新就等于等命令执行完。
 
@@ -648,7 +657,7 @@ src-tauri\target\release\rust-sticky-notes.exe --raise-all
   ],
   "windows": [
     { "label": "note-7dc71de7-...", "note_id": "7dc71de7-...", "hwnd": 198458,
-      "exstyle": "0x40118", "topmost": true, "raised": true, "noactivate": false, "toolwindow": false,
+      "exstyle": "0x40118", "topmost": true, "noactivate": false, "toolwindow": false,
       "owner_hwnd": 65974, "owner_class": "Progman", "class": "Tauri Window", "title": "测试便签",
       "visible": true, "iconic": false, "focused": false,
       "rect": { "x": 2062, "y": 577, "w": 640, "h": 840 },
@@ -660,10 +669,7 @@ src-tauri\target\release\rust-sticky-notes.exe --raise-all
 
 - `exstyle` 是十六进制字符串，另把 `WS_EX_TOPMOST(0x8)` / `WS_EX_NOACTIVATE(0x08000000)` /
   `WS_EX_TOOLWINDOW(0x80)` 解成 `topmost` / `noactivate` / `toolwindow`，脚本不用自己做位运算；
-- `raised` 是**语义状态位**（0.4.1 新增，0.4.2 起由 `reconcile` 统一维护）：
-  `true` = 该便签被显式抬到前面，`false` = 应该沉在底部。第 3 条不变量靠它区分
-  "用户自己抬起来的便签压住前台（SKIP）"与
-  "后台便签莫名压住前台（FAIL）"；
+- 0.4.3 起 `raised` 字段已删除：`pinned` 的唯一真相就是窗口自己的 `WS_EX_TOPMOST`，
 - `owner_class` 用 `GetClassNameW` 取，用来确认 owner 还是 `Progman`（owner 为 0 时 `owner_hwnd=0`、
   `owner_class=""`）；
 - `notes[]` 比数据文件多一个 `visible` 字段：第 6 条不变量要靠它区分"隐藏且没有窗口"与"本该有窗口却没有"；
@@ -678,7 +684,7 @@ src-tauri\target\release\rust-sticky-notes.exe --raise-all
 
 ```powershell
 npm run tauri build -- --no-bundle
-powershell -File scripts\check-zorder.ps1                  # 7 个场景 / 28 条断言 / ~5 秒
+powershell -File scripts\check-zorder.ps1                  # 8 个场景 / 31 条断言 / ~5 秒
 powershell -File scripts\check-zorder.ps1 -SkipRestart     # 不重启应用（更快，~3 秒）
 powershell -File scripts\check-zorder.ps1 -Exe <别的 exe>  # 指到别的构建产物
 ```
@@ -686,12 +692,14 @@ powershell -File scripts\check-zorder.ps1 -Exe <别的 exe>  # 指到别的构�
 脚本做的事：确保有 ≥2 张便签（不足会自动 `--new-note` 一张，结束时删掉）→ `--sink-notes`
 复位成沉底 → 把记事本拉到前台 → `--check` 断言"未置顶便签没压住前台" →
 `--set-pin` 置顶一次（断言进了置顶层）→ `--set-pin` 取消置顶一次（断言**没有沉降**：
-仍在记事本之上、`topmost=false`、`raised=true`）→ **取消置顶不影响兄弟**（一钉一不钉时取消置顶，
-断言兄弟 `raised` 仍为 false、z 仍在前台之后）→ 两张一钉一不钉、每轮先 `--sink-notes`，
-切换 2 轮断言"仍未抬升的那张 z 始终在前台之后"→ `--sink-notes` 后 `--raise-all`
-断言"所有便签 z 都小于记事本 z"，再 dump 一次确认没被踩回去 → 关进程重启，断言置顶状态与
-`store.json` 一致。失败时打印 dump 里的相关原始字段并返回非 0，临时文件保留（`%TEMP%\sticky-*`），
-成功则删除。它只关自己拉起来的记事本、只恢复自己改过的置顶状态，不会动用户的便签内容。
+仍在记事本之上、`topmost=false`）→ **取消置顶不影响兄弟**（一钉一不钉时取消置顶，
+断言兄弟的 z 序号**一位都没变**）→ 两张一钉一不钉、每轮先 `--sink-notes`，
+切换 2 轮断言"未置顶那张 z 始终在前台之后"→ **激活隔离**（真实 `SetForegroundWindow`
+激活 A，按 60ms 采样 5 次断言 B 的 z 一动不动，这是 0.4.3 的核心回归）→
+`--sink-notes` 后 `--raise-all` 断言"所有便签 z 都小于记事本 z"，再 dump 一次确认没被踩回去 →
+关进程重启，断言置顶状态与 `store.json` 一致。失败时打印 dump 里的相关原始字段并返回非 0，
+临时文件保留（`%TEMP%\sticky-*`），成功则删除。它只关自己拉起来的记事本、只恢复自己改过的
+置顶状态，不会动用户的便签内容。
 
 > 脚本必须用 **Windows PowerShell 5.1**（`powershell`，不是 `pwsh`）跑，并且文件本身要存成
 > **UTF-8 with BOM**：5.1 在没有 BOM 时按 ANSI 解析脚本源码，中文注释会直接让它报语法错误。
@@ -705,9 +713,10 @@ powershell -File scripts\check-zorder.ps1 -Exe <别的 exe>  # 指到别的构�
 
 - Win+D 已经不被最小化了（见上节），但 **Win+M（最小化所有窗口）仍会把便签一起最小化**——
   Win+M 是系统级的"最小化"而不是"显示桌面"，owner 关系管不到；需要托盘唤回
-- 便签同属一个 owner 组，所以"激活连带"只能事后重排兜住：极端情况下（其它软件也在操作
-  owner = Progman 的窗口）仍可能有**一帧**的层级抖动，下一次 `reconcile()` 就会收敛。
-  这个窗口期在 Windows 侧无法消除，只能缩短
+- 便签同属一个 owner 组，所以"激活连带"只能事后补垫兜住：点 A 的瞬间，系统会把整组抬到
+  普通层最前，`settle_siblings()` 会在 110ms 内把不该动的兄弟垫回去。**理论上**有极短的
+  窗口期（实测真实鼠标点击以 15ms 采样 20 次，一次都没观察到），但这个连带本身在 Windows
+  侧无法阻止，只能缩短
 - owner 绑在 Progman 上属于 Win32 的"拥有者"技巧，属于未文档化的行为细节：
   **explorer.exe 重启后 Progman 换了 HWND，绑定会失效**（便签退回普通窗口，Win+D 期间又会被
   桌面盖住）。当前版本没有自动重绑，重启便签即可恢复——需要的是监听 `TaskbarCreated` 广播后重新

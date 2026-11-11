@@ -256,7 +256,7 @@ fn set_note_pinned(
 ///
 /// Windows 上**不调** tao 的 `set_always_on_top`：它走 `HWND_NOTOPMOST` 且不带
 /// `SWP_NOOWNERZORDER`，会顺手把同 owner 组的兄弟窗口一起拽起来。层级的实际改动由
-/// `win_desktop_pin::set_user_pinned`（= 改状态 → `reconcile()`）完成。
+/// `win_desktop_pin::set_user_pinned` 完成——它只对这一个窗口调一次 `SetWindowPos`。
 fn apply_pinned(
     webview: &WebviewWindow,
     id: &str,
@@ -523,17 +523,12 @@ fn create_note_window(
 
     attach_window_events(app, &window);
 
-    // 抵抗 Win+D：把桌面窗口设成便签的 owner，再把便签垫到桌面之上、其它窗口之下。
-    // 顺序很重要：必须在 show 之后（窗口已可见才有 z 序可言），并且在 focus 之前
-    // （激活会把同 owner 组的兄弟窗口一起抬起来，见 win_desktop_pin 顶部「历史坑位速查」）。
+    // 抵抗 Win+D：把桌面窗口设成便签的 owner。只绑 owner，不动 z 序（新窗口就该在最前）。
     #[cfg(windows)]
-    win_desktop_pin::install(&window, note.pinned);
+    win_desktop_pin::install(&window);
 
     if focus {
         let _ = window.set_focus();
-        // 激活之后同 owner 组的未置顶便签会被连带抬起，重排一次把它们压回去
-        #[cfg(windows)]
-        win_desktop_pin::note_activated(&window);
     }
 
     Ok(window)
@@ -611,13 +606,13 @@ fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
             schedule_geometry_persist(&app, &label);
         }
-        // 便签被激活（用户点它、或程序 focus）时，Windows 会把同一 owner 组
-        // （owner = Progman）的其它便签一起抬到普通层最前面。这正是"点 A 的图钉，
-        // B 窜到前台应用之上"的直接原因，所以激活之后统一重排一次层级。
+        // 激活便签时 Windows 会把整个 owner 组（owner = Progman）抬到普通层最前面，
+        // 后台沉底的兄弟会跟着窜到前台应用之上。这不是我们的 SetWindowPos 干的，
+        // 只能事后把那些不该动的兄弟放回底部——只放它们，不碰被激活的这张。
         WindowEvent::Focused(true) => {
             #[cfg(windows)]
             if let Some(win) = app.get_webview_window(&label) {
-                win_desktop_pin::note_activated(&win);
+                win_desktop_pin::settle_siblings(&win);
             }
         }
         WindowEvent::CloseRequested { api, .. } => {
@@ -970,9 +965,9 @@ fn focus_existing_notes(app: &AppHandle) {    let Some(state) = app.try_state::<
 
 /// 托盘左键 / `--raise-all` 的统一入口：把**全部**便签显式抬到前台应用之上。
 ///
-/// 只对最后一张 `set_focus()`（早期版本只 focus 一个窗口，那个窗口的 `Focused(true)`
-/// 会把其它未置顶便签踩到底，用户看到"一张在前、另一张闪回去"）。现在所有窗口先被
-/// `raise_notes` 标记成 raised 并统一重排，随后的 `Focused(true)` 不会再把兄弟压回去。
+/// 这是用户显式要求的全局动作，所以它会一次性抬起每一张便签；除此之外任何路径都只碰
+/// 自己那一张窗口（见 `win_desktop_pin` 顶部「一条铁律」）。窗口按 store 顺序传入，
+/// `raise_notes` 倒序贴顶，最后只对第一张聚焦一次。
 fn show_all_notes(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;

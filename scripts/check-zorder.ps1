@@ -10,14 +10,17 @@
       2. 前台覆盖  ：先 --sink-notes 复位成"沉底"，再把普通应用（记事本）拉到前台，
                      未置顶便签不得压住它
       3. 切置顶    ：--set-pin auto true/false。0.4.1 起取消置顶**不再沉降**：
-                     断言该便签仍在记事本之上（z 更小）、topmost=false、raised=true
-      4. 取消置顶不影响兄弟：一钉一不钉、兄弟仍为 Sunk → 取消置顶那张 →
-                     断言兄弟 raised 仍为 false 且 z 仍在前台应用之后（没被拉上来）
+                     断言该便签仍在记事本之上（z 更小）、topmost=false
+      4. 取消置顶不影响兄弟：一钉一不钉、兄弟沉底 → 取消置顶那张 →
+                     断言兄弟的 z 一位都没变（没被拉上来）
       5. 兄弟不连坐：一钉一不钉、每轮先 --sink-notes，反复切 2 轮，
-                     未置顶那张（Sunk）始终在记事本之下
+                     未置顶那张始终在记事本之下
       6. 托盘抬升  ：--sink-notes → --raise-all（等价于点托盘左键）→
                      断言所有便签的 z 都小于记事本的 z，且再 dump 一次仍然成立
       7. 重启一致性：关进程 → 重启 → 置顶状态与 store 完全一致
+
+    0.4.3 起没有 raised 状态位：pinned 的唯一真相是窗口自己的 WS_EX_TOPMOST，
+    所有断言只看 exstyle 与 z，不看任何内存意图。
 
     全程不靠人眼看截图，判定只用 dump / check 里的数值。
     结束时清理：关掉自己启动的记事本、恢复改动过的置顶状态、删除自己建的临时便签。
@@ -225,8 +228,7 @@ function Set-NotePin {
     Invoke-StickyCommand -Arguments @('--set-pin', $NoteId, $truth, '--dump') -Artifact $script:DumpPath | Out-Null
 }
 
-# 把所有未置顶便签复位成"沉底"（层位意图 Sunk），并把意图落回默认值。
-# 0.4.1 起取消置顶/托盘抬升都会把窗口标成 Raised，回归前必须显式复位才有确定的起点。
+# 把未置顶便签全部垫底，给"沉底兄弟"这类断言一个确定起点（纯 z 序操作，无状态位）。
 function Invoke-SinkNotes {
     return (Invoke-StickyCommand -Arguments @('--sink-notes', '--dump') -Artifact $script:DumpPath)
 }
@@ -405,7 +407,7 @@ function Get-ForegroundInfo {
 # ---------------------------------------------------------------- 场景
 
 function Step-Baseline {
-    Write-Step '场景 1/7：基线（便签数 ≥ 2 + 六条不变量）'
+    Write-Step '场景 1/8：基线（便签数 ≥ 2 + 六条不变量）'
 
     $check = Invoke-StickyCheck
     $dump = Read-Dump
@@ -439,9 +441,9 @@ function Step-Baseline {
 }
 
 function Step-ForegroundCover {
-    Write-Step '场景 2/7：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
+    Write-Step '场景 2/8：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
 
-    # 0.4.1：抬升/取消置顶都会留下 Raised 意图，先显式复位成 Sunk 才有确定起点
+    # 先垫底，给"未置顶便签不得压住前台"一个确定起点
     Invoke-SinkNotes | Out-Null
     $ok = Start-ForegroundApp
     Start-Sleep -Milliseconds 60
@@ -456,7 +458,7 @@ function Step-ForegroundCover {
 }
 
 function Step-TogglePin {
-    Write-Step '场景 3/7：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
+    Write-Step '场景 3/8：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
 
     $dump = Read-Dump
     $sorted = @($dump.notes | Sort-Object id)
@@ -489,8 +491,17 @@ function Step-TogglePin {
     Add-Result '切置顶 false：目标便签退出置顶层' ((-not [bool]$win.topmost) -and (-not [bool]$note.pinned)) ("exstyle={0} topmost={1} data.pinned={2}" -f $win.exstyle, $win.topmost, $note.pinned)
     $stillAbove = ($null -ne $noteZ) -and ($null -ne $refZ) -and ([int]$noteZ -lt [int]$refZ)
     Add-Result '切置顶 false：目标便签仍在记事本之上（没有沉降）' $stillAbove ("便签 z={0} 记事本 z={1}" -f $noteZ, $refZ)
-    Add-Result '切置顶 false：目标便签被标记为 raised' ([bool]$win.raised) ("raised={0}" -f $win.raised)
     Add-Result '切置顶 false：置顶一致（没有连带状态漂移）' (Test-CheckPassed -Check $check -Id 'pin_consistency') (Describe-Check -Check $check -Id 'pin_consistency')
+}
+
+# 把指定便签强制设成期望的置顶状态（不用 Get-PinMap 猜，重跑多少次起点都一样）
+function Set-PinsExact {
+    param($Dump, [string]$PinnedId, [string]$UnpinnedId)
+    Set-NotePin -NoteId $UnpinnedId -Pinned $false
+    Set-NotePin -NoteId $PinnedId -Pinned $false
+    Invoke-SinkNotes | Out-Null
+    Set-NotePin -NoteId $PinnedId -Pinned $true
+    Invoke-SinkNotes | Out-Null
 }
 
 function Read-NoteDump {
@@ -506,29 +517,22 @@ function Read-NoteDump {
 # 会牵动同一个 owner 组（owner = Progman）的兄弟窗口。
 # 新实现不调 tao，所有 z 序动作都显式带 SWP_NOOWNERZORDER，并由 reconcile 全量重排。
 function Step-UnpinIsolation {
-    Write-Step '场景 4/7：取消置顶不影响兄弟（兄弟不得被连带拉起）'
+    Write-Step '场景 4/8：取消置顶不影响兄弟（兄弟不得被连带拉起）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
     $a = $sorted[0].id
     $b = $sorted[1].id
 
-    # 起点：A 置顶、B 沉底（Sunk），前台是记事本
-    Invoke-SinkNotes | Out-Null
-    $pins = Get-PinMap (Read-Dump)
-    if ($pins[$a]) {
-        Set-NotePin -NoteId $a -Pinned $false
-        Invoke-SinkNotes | Out-Null
-    }
-    Set-NotePin -NoteId $a -Pinned $true
+    # 起点：A 置顶、B 沉底，前台是记事本
+    Set-PinsExact -PinnedId $a -UnpinnedId $b
     Start-ForegroundApp | Out-Null
     $beforeDump = Read-Dump
     $before = Get-ZSnapshot -Dump $beforeDump -RefHwnd (Get-NotepadHwnd)
-    $bBefore = Get-WindowOf -Dump $beforeDump -NoteId $b
     $fgBefore = $before.RefZ
     $bZBefore = if ($before.NoteZ.ContainsKey($b)) { [int]$before.NoteZ[$b] } else { $null }
-    $setupOk = ([bool]$bBefore.raised -eq $false) -and ($null -ne $fgBefore) -and ($null -ne $bZBefore) -and ($bZBefore -gt [int]$fgBefore)
-    Add-Result '取消置顶不影响兄弟 前置：兄弟仍是 Sunk 且在前台之下' $setupOk ("兄弟 raised={0} z={1} 前台 z={2}" -f $bBefore.raised, $bZBefore, $fgBefore)
+    $setupOk = ($null -ne $fgBefore) -and ($null -ne $bZBefore) -and ($bZBefore -gt [int]$fgBefore)
+    Add-Result '取消置顶不影响兄弟 前置：兄弟沉底且在前台之下' $setupOk ("兄弟 z={0} 前台 z={1}" -f $bZBefore, $fgBefore)
 
     # 取消 A 的置顶，**立刻** dump（不等待、不做任何复位）
     Set-NotePin -NoteId $a -Pinned $false
@@ -540,19 +544,19 @@ function Step-UnpinIsolation {
     $aZ = if ($after.NoteZ.ContainsKey($a)) { [int]$after.NoteZ[$a] } else { $null }
     $bZAfter = if ($after.NoteZ.ContainsKey($b)) { [int]$after.NoteZ[$b] } else { $null }
 
-    Add-Result '取消置顶不影响兄弟：被取消的那张 topmost=false、raised=true' ((-not [bool]$wA.topmost) -and [bool]$wA.raised) ("exstyle={0} topmost={1} raised={2}" -f $wA.exstyle, $wA.topmost, $wA.raised)
+    Add-Result '取消置顶不影响兄弟：被取消的那张 topmost=false' (-not [bool]$wA.topmost) ("exstyle={0} topmost={1}" -f $wA.exstyle, $wA.topmost)
     $aStillAbove = ($null -ne $aZ) -and ($null -ne $fgAfter) -and ($aZ -lt [int]$fgAfter)
     Add-Result '取消置顶不影响兄弟：被取消的那张仍在前台应用之前（没有沉降）' $aStillAbove ("被取消的 z={0} 前台 z={1}" -f $aZ, $fgAfter)
-    Add-Result '取消置顶不影响兄弟：兄弟 raised 仍为 false（没被连带抬起）' (-not [bool]$wB.raised) ("raised={0} exstyle={1}" -f $wB.raised, $wB.exstyle)
-    $bStillBelow = ($null -ne $bZAfter) -and ($null -ne $fgAfter) -and ($bZAfter -gt [int]$fgAfter)
-    Add-Result '取消置顶不影响兄弟：兄弟 z 仍在前台应用之后（没被拉上来）' $bStillBelow ("兄弟 z={0}（取消前 {1}）前台 z={2}" -f $bZAfter, $bZBefore, $fgAfter)
+    # 核心断言：兄弟的 z 序号必须**一位都没变**（0.4.3 铁律：操作 A 不得改变 B）
+    Add-Result '取消置顶不影响兄弟：兄弟 z 序号完全没变' (($null -ne $bZBefore) -and ($null -ne $bZAfter) -and ($bZAfter -eq $bZBefore)) ("兄弟 z={0}（取消前 {1}）" -f $bZAfter, $bZBefore)
+    Add-Result '取消置顶不影响兄弟：兄弟仍在前台应用之后' (($null -ne $bZAfter) -and ($null -ne $fgAfter) -and ($bZAfter -gt [int]$fgAfter)) ("兄弟 z={0} 前台 z={1}" -f $bZAfter, $fgAfter)
 
     $script:ChangedPins[$a] = $true
     $script:ChangedPins[$b] = $true
 }
 
 function Step-SiblingIsolation {
-    Write-Step '场景 5/7：兄弟不连坐（一钉一不钉，切 2 轮）'
+    Write-Step '场景 5/8：兄弟不连坐（一钉一不钉，切 2 轮）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -567,8 +571,6 @@ function Step-SiblingIsolation {
         Invoke-SinkNotes | Out-Null
         $pins = Get-PinMap (Read-Dump)
         if ($pins[$unpinned]) {
-            # 取消置顶会把它标成 Raised（0.4.1 的预期行为），这里要的是"Sunk 兄弟不连坐"，
-            # 所以复位一次，让它回到"还沉在底部"的状态再断言。
             Set-NotePin -NoteId $unpinned -Pinned $false
             Invoke-SinkNotes | Out-Null
         }
@@ -579,11 +581,10 @@ function Step-SiblingIsolation {
         $dump = Read-Dump
         $zs = Get-ZSnapshot -Dump $dump -RefHwnd (Get-NotepadHwnd)
         $fgZ = $zs.RefZ
-        $unpinnedWin = Get-WindowOf -Dump $dump -NoteId $unpinned
         $unpinnedZ = $null
         if ($zs.NoteZ.ContainsKey($unpinned)) { $unpinnedZ = [int]$zs.NoteZ[$unpinned] }
         $belowForeground = ($null -ne $fgZ) -and ($null -ne $unpinnedZ) -and ($unpinnedZ -gt [int]$fgZ)
-        Add-Result ("兄弟不连坐 第{0}轮：未置顶(仍 Sunk) {1} 的 z 仍大于前台 z" -f $round, $unpinned.Substring(0, 8)) $belowForeground ("未置顶 z={0} raised={1} 前台 z={2} class={3}" -f $unpinnedZ, $unpinnedWin.raised, $fgZ, $dump.foreground.class)
+        Add-Result ("兄弟不连坐 第{0}轮：未置顶 {1} 的 z 仍大于前台 z" -f $round, $unpinned.Substring(0, 8)) $belowForeground ("未置顶 z={0} 前台 z={1} class={2}" -f $unpinnedZ, $fgZ, $dump.foreground.class)
         Add-Result ("兄弟不连坐 第{0}轮：置顶一致" -f $round) (Test-CheckPassed -Check $check -Id 'pin_consistency') (Describe-Check -Check $check -Id 'pin_consistency')
 
         $script:ChangedPins[$a] = $true
@@ -591,8 +592,64 @@ function Step-SiblingIsolation {
     }
 }
 
+# 0.4.3 核心回归：**点 A 不得动 B**。
+#
+# 用户报的原始现象：A 置顶、B 沉底，浏览器在前；点 A 的任意位置（文本区 / 标题 / 图钉），
+# B 立刻窜到浏览器前面。根因是 0.4.2 的"全量 reconcile"——它在每次激活时给**所有**窗口
+# 重新排一遍 z 序，B 于是被 SetWindowPos(HWND_TOP) 顶上去。
+# 现在激活路径什么都不做，所以断言很硬：激活前后 B 的 z 序号必须一模一样。
+function Step-ActivationIsolation {
+    Write-Step '场景 6/8：激活 A 完全不改变 B（点击隔离）'
+
+    $dump = Read-NoteDump
+    $sorted = @($dump.notes | Sort-Object id)
+    $a = $sorted[0].id
+    $b = $sorted[1].id
+
+    # 起点必须确定：两张都先退出置顶层（用户可能在 UI 里钉过任意一张），垫底，然后只钉 A
+    Set-PinsExact -PinnedId $a -UnpinnedId $b
+    Start-ForegroundApp | Out-Null
+
+    $refHwnd = Get-NotepadHwnd
+    $beforeDump = Read-Dump
+    $before = Get-ZSnapshot -Dump $beforeDump -RefHwnd $refHwnd
+    $wA0 = Get-WindowOf -Dump $beforeDump -NoteId $a
+    $wB0 = Get-WindowOf -Dump $beforeDump -NoteId $b
+    $bZBefore = if ($before.NoteZ.ContainsKey($b)) { [int]$before.NoteZ[$b] } else { $null }
+    $setupOk = ([bool]$wA0.topmost) -and (-not [bool]$wB0.topmost) -and
+        ($null -ne $before.RefZ) -and ($null -ne $bZBefore) -and ($bZBefore -gt [int]$before.RefZ)
+    Add-Result '点击隔离 前置：A 置顶、B 沉底、记事本在前台' $setupOk ("A topmost={0} B topmost={1} B z={2} 前台 z={3}" -f $wA0.topmost, $wB0.topmost, $bZBefore, $before.RefZ)
+
+    $activated = [StickyCheckNative]::ForceForeground([IntPtr][int64]$wA0.hwnd)
+    Add-Result '点击隔离：A 确实被激活了（前置）' $activated ("ForceForeground(A) => {0}" -f $activated)
+
+    # 采样：先等 40ms 让系统完成激活连带，再连续采 5 次。
+    # 不等这 40ms 的话，t=0 那一次必然读到"系统刚抬起、我们还没来得及补垫"的中间态——
+    # 那个瞬间在 Windows 侧不可能消除（连带发生在我们的 Focused 回调之后）。
+    Start-Sleep -Milliseconds 40
+    $samples = @()
+    foreach ($i in 1..5) {
+        $s = Get-ZSnapshot -Dump $beforeDump -RefHwnd $refHwnd
+        if ($s.NoteZ.ContainsKey($b)) { $samples += [int]$s.NoteZ[$b] }
+        Start-Sleep -Milliseconds 60
+    }
+    $afterDump = Read-Dump
+    $after = Get-ZSnapshot -Dump $afterDump -RefHwnd $refHwnd
+    $bZAfter = if ($after.NoteZ.ContainsKey($b)) { [int]$after.NoteZ[$b] } else { $null }
+
+    $allSame = ($samples.Count -eq 5) -and (@($samples | Where-Object { $_ -ne $bZBefore }).Count -eq 0)
+    Add-Result '点击隔离：激活 A 后 B 的 z 序号纹丝不动' $allSame ("B z={0}（激活前 {1}；5 次采样 {2}）" -f $bZAfter, $bZBefore, ($samples -join ','))
+    $bStillBelow = ($null -ne $bZAfter) -and ($null -ne $after.RefZ) -and ($bZAfter -gt [int]$after.RefZ)
+    Add-Result '点击隔离：B 仍在记事本之后（没被拉到前台）' $bStillBelow ("B z={0} 记事本 z={1}" -f $bZAfter, $after.RefZ)
+    $wB = Get-WindowOf -Dump $afterDump -NoteId $b
+    Add-Result '点击隔离：B 的 exstyle 没有变化' ((-not [bool]$wB.topmost)) ("exstyle={0} topmost={1}" -f $wB.exstyle, $wB.topmost)
+
+    $script:ChangedPins[$a] = $true
+    $script:ChangedPins[$b] = $true
+}
+
 function Step-RaiseAll {
-    Write-Step '场景 6/7：托盘抬升等价路径（--raise-all）'
+    Write-Step '场景 7/8：托盘抬升等价路径（--raise-all）'
 
     $refHwnd = Get-NotepadHwnd
     Invoke-SinkNotes | Out-Null
@@ -641,11 +698,10 @@ function Step-RaiseAll {
         if ($null -eq $again.RefZ -or $z -ge [int]$again.RefZ) { $bad2 += ('{0} z={1} >= 记事本 z={2}' -f $w.note_id.Substring(0, 8), $z, $again.RefZ) }
     }
     Add-Result '托盘抬升：之后没有便签被踩回记事本之下' ($bad2.Count -eq 0) ($(if ($bad2.Count -gt 0) { $bad2 -join '；' } else { ($checked2 -join '、') + ('；记事本 z={0}' -f $again.RefZ) }))
-    Add-Result '托盘抬升：所有便签都被标记为 raised' (@($raiseDump.windows | Where-Object { -not [bool]$_.raised }).Count -eq 0) (($raiseDump.windows | ForEach-Object { '{0} raised={1}' -f $_.note_id.Substring(0, 8), $_.raised }) -join '、')
 }
 
 function Step-RestartConsistency {
-    Write-Step '场景 7/7：重启一致性（置顶状态与 store 一致）'
+    Write-Step '场景 8/8：重启一致性（置顶状态与 store 一致）'
 
     $dump = Read-Dump
     $pinsBefore = Get-PinMap $dump
@@ -691,8 +747,8 @@ function Show-FailureContext {
         Write-Host ('前台: hwnd={0} class="{1}" title="{2}" is_ours={3} z={4}' -f $dump.foreground.hwnd, $dump.foreground.class, $dump.foreground.title, $dump.foreground.is_ours, $dump.foreground.z)
         Write-Host '窗口:'
         foreach ($w in $dump.windows) {
-            Write-Host ('  {0} hwnd={1} ex={2} topmost={3} raised={4} owner={5}/{6} z={7}/{8} rect={9}x{10} visible={11}' -f `
-                    $w.label, $w.hwnd, $w.exstyle, $w.topmost, $w.raised, $w.owner_hwnd, $w.owner_class, $w.z, $w.z_total, $w.rect.w, $w.rect.h, $w.visible)
+            Write-Host ('  {0} hwnd={1} ex={2} topmost={3} owner={4}/{5} z={6}/{7} rect={8}x{9} visible={10}' -f `
+                    $w.label, $w.hwnd, $w.exstyle, $w.topmost, $w.owner_hwnd, $w.owner_class, $w.z, $w.z_total, $w.rect.w, $w.rect.h, $w.visible)
         }
         Write-Host '便签:'
         foreach ($n in $dump.notes) {
@@ -744,7 +800,7 @@ function Restore-State {
             Write-Host ('   删除临时便签失败：{0}' -f $_.Exception.Message) -ForegroundColor Yellow
         }
     }
-    # 层位复位：把最后留下的 Raised 状态收回 Sunk，让用户的便签回到"桌面便签"的常态
+    # 层位复位：把被抬起的便签垫回桌面常态（脚本跑完后用户看到的应与跑之前一样）
     try {
         Invoke-SinkNotes | Out-Null
     } catch {
@@ -774,9 +830,10 @@ try {
     Step-TogglePin
     Step-UnpinIsolation
     Step-SiblingIsolation
+    Step-ActivationIsolation
     Step-RaiseAll
     if ($SkipRestart) {
-        Write-Step '场景 7/7：重启一致性 —— 已按 -SkipRestart 跳过'
+        Write-Step '场景 8/8：重启一致性 —— 已按 -SkipRestart 跳过'
     } else {
         Step-RestartConsistency
     }

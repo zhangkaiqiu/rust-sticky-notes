@@ -102,8 +102,6 @@ pub struct WindowEntry {
     pub hwnd: isize,
     pub exstyle: String,
     pub topmost: bool,
-    /// 层位意图是否为 Raised（被用户显式抬到前面）；`false` 表示 Sunk（该待在底部）
-    pub raised: bool,
     pub noactivate: bool,
     pub toolwindow: bool,
     pub owner_hwnd: isize,
@@ -259,7 +257,6 @@ fn build_window_entry(
         hwnd: hwnd.0 as isize,
         exstyle: format!("0x{ex:X}"),
         topmost: ex & EX_TOPMOST != 0,
-        raised: crate::win_desktop_pin::is_raised(hwnd.0 as isize),
         noactivate: ex & EX_NOACTIVATE != 0,
         toolwindow: ex & EX_TOOLWINDOW != 0,
         owner_hwnd: owner.0 as isize,
@@ -498,13 +495,10 @@ fn check_owner_progman(snapshot: &Snapshot) -> CheckItem {
     }
 }
 
-/// 3. 不越界：**未置顶便签不得压住前台窗口，除非它被标记为 raised**
+/// 3. 不越界：**未置顶便签不得压住前台窗口**
 ///
-/// 前台窗口是我们自己的便签 / 拿不到前台窗口时跳过——此时这条断言没有意义。
-///
-/// 0.4.1 的语义变化：用户显式把便签抬到前面（点托盘 / 点它自己 / 取消置顶）之后，
-/// 它压住前台窗口是**预期行为**，不能算违约。这类窗口记 `skip` 并在 detail 里说明；
-/// 只有"还该沉在底部（`raised == false`）却压住了前台"才是 FAIL。
+/// 例外只有一个：这张窗口自己就是前台窗口（用户刚点它，它是前台，不是"压住前台"）。
+/// 前台窗口是我们自己的便签 / 拿不到前台窗口时整条跳过——此时这条断言没有意义。
 fn check_no_cover_foreground(snapshot: &Snapshot) -> CheckItem {
     let fg = &snapshot.foreground;
     if fg.hwnd == 0 {
@@ -530,7 +524,6 @@ fn check_no_cover_foreground(snapshot: &Snapshot) -> CheckItem {
 
     let mut bad = Vec::new();
     let mut checked = Vec::new();
-    let mut raised_above = Vec::new();
     for window in &snapshot.windows {
         let Some(note) = note_of(snapshot, &window.note_id) else {
             continue;
@@ -541,10 +534,9 @@ fn check_no_cover_foreground(snapshot: &Snapshot) -> CheckItem {
         match window.z {
             // 在前台之下：正常
             Some(z) if z > fg_z => checked.push(format!("{} z={z}", window.label)),
-            // 压住了前台：只有"被显式抬到前面"才允许
-            Some(z) if window.raised => raised_above.push(format!("{} z={z}", window.label)),
+            // 压住了前台：违约
             Some(z) => bad.push(format!(
-                "{} 未置顶、raised=false 但 z={z} 比前台窗口 z={fg_z} 更靠前（会盖住前台应用）",
+                "{} 未置顶但 z={z} 比前台窗口 z={fg_z} 更靠前（会盖住前台应用）",
                 window.label
             )),
             None => {} // 隐藏窗口没有 z 可言
@@ -553,16 +545,6 @@ fn check_no_cover_foreground(snapshot: &Snapshot) -> CheckItem {
 
     if !bad.is_empty() {
         return fail("no_cover_foreground", "不越界", bad.join("；"));
-    }
-    if !raised_above.is_empty() {
-        return skip(
-            "no_cover_foreground",
-            "不越界",
-            format!(
-                "{} 已被显式抬到前面（raised=true），压住前台窗口属预期行为",
-                raised_above.join("、")
-            ),
-        );
     }
     CheckItem {
         id: "no_cover_foreground",
