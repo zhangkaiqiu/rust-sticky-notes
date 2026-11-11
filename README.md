@@ -418,6 +418,63 @@ B 就会拉到前台」——以及更根本的要求：**对 A 的所有操作�
 - `powershell -File scripts\check-zorder.ps1` → **31/31 通过**（新增「点击隔离」场景），
   连跑 3 次结果完全一致
 
+### 0.4.4 置顶位被 tao 抹掉 + 托盘唤不回（2026-11-11）
+
+用户点了「诊断：导出窗口状态」，导出的 JSON 自己报了警：
+
+```
+A: pinned=true(store)  topmost=false  exstyle=0x40110  z=25/27
+B: pinned=false        topmost=false  exstyle=0x40110  z=6/27
+violations:
+  · 置顶一致：A 数据 pinned=true 但窗口 topmost=false
+  · 置顶在最前：置顶窗口 A z=25 落在未置顶窗口 B z=6 之后
+```
+
+**这不是层序问题，是 `WS_EX_TOPMOST` 位整个没了。** 两个独立 bug 叠在一起：
+
+#### bug 1：tao 每次重算 flags 都会把置顶位抹掉
+
+`tao` 的 `WindowFlags::apply_diff()` 收尾时无条件执行：
+
+```rust
+let (_, style_ex) = new.to_window_styles();   // 按 tao **内部**记录的 flags 重拼
+SetWindowLongW(hwnd, GWL_EXSTYLE, style_ex);  // 直接覆盖整条 exstyle
+```
+
+而我们切换置顶时刻意绕开 tao（它的 `set_always_on_top` 带 `SWP_ASYNCWINDOWPOS`
+且不带 `SWP_NOOWNERZORDER`，见 0.4.2），直接调 `SetWindowPos`。于是 **tao 内部
+`ALWAYS_ON_TOP` 位永远停在创建时的值**。之后任何一次 tao flags 重算——关到托盘再唤回
+（`set_visible`）、最小化等——都会拿这份旧模型覆盖整条 exstyle，把置顶位悄悄抹掉。
+
+没有任何路径会把它恢复：`apply_pinned` 看到"值没变"直接返回，`raise_notes` 看到
+`has_topmost=false` 就走 `HWND_TOP`。于是便签沉在浏览器后面，而 store 里仍写 `pinned=true`。
+
+抓证据时踩的坑：
+- 一开始给 `WM_WINDOWPOSCHANGING` 加 `trace-z`，**一条都没打**——说明不是
+  `SetWindowPos` 清掉的（`trace-z` 只记 `SWP_NOZORDER` 之外的调用）；
+- 再加 `WM_STYLECHANGING` 追踪，一次命中：`[trace-topmost] B old=0x40118 new=0x40110`。
+
+修法：在窗口过程的 `WM_STYLECHANGING` 里把 `styleNew` 的该位**锁成 `styleOld` 的值**，
+等于"除我们自己以外谁也改不动置顶位"（`place()` 期间靠 `SELF_ZORDER` 放行）。
+
+#### bug 2：`--raise-all` 唤不回已隐藏的便签
+
+原来 `run_cli_after_note` 里 `--raise-all` 只调 `win_desktop_pin::raise_notes()`，
+而它只处理"已经存在且可见"的窗口。收进托盘的便签被 `hide()` 过，直接被漏掉——
+注释说它"等价于点托盘左键"，实际并不等价（托盘走的是 `show_all_notes`，里面有
+`ensure_window_visible`）。
+
+修法：`--raise-all` 改调 `show_all_notes(app)`，与托盘完全同一条路径。
+
+#### 回归
+
+新增场景 8「关到托盘再唤回，置顶位不得丢失」（发 `WM_CLOSE` → 等
+`IsWindowVisible=false` → `--raise-all` → 直接读 `WS_EX_TOPMOST` 断言）。
+这条路径以前**完全没被覆盖**，正是它让 bug 一直逃过 31/31 的全绿。
+
+`powershell -File scripts\check-zorder.ps1` → **38/38 通过**（9 个场景），连跑 3 次一致。
+
+
 ## 启动速度怎么测
 
 ```powershell

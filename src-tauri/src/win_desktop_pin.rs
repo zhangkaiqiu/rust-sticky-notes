@@ -60,7 +60,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetPropW, GetWindowLongPtrW, SetPropW, SetWindowLongPtrW, SetWindowPos, WindowFromPoint,
     GWL_EXSTYLE, GWLP_HWNDPARENT, GWLP_WNDPROC, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP,
     HWND_TOPMOST, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_NOZORDER, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_WINDOWPOSCHANGING, WNDPROC, WS_EX_TOPMOST,
+    SWP_NOZORDER, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WNDPROC,
+    WS_EX_TOPMOST,
 };
 
 /// 原窗口过程存在窗口属性里（不走全局表，销毁时随窗口一起消失）
@@ -212,6 +213,33 @@ unsafe extern "system" fn note_wndproc(
                     PRESS_PROP,
                     Some(HANDLE((now_ms() + PRESS_GRACE_MS) as *mut _)),
                 );
+            }
+        }
+        WM_STYLECHANGING => {
+            // 只有我们自己（place() / set_user_pinned）能翻转 WS_EX_TOPMOST。
+            //
+            // 起因：tao 的 `WindowFlags::apply_diff()` 收尾时无条件执行
+            //   `SetWindowLongW(hwnd, GWL_EXSTYLE, new.to_window_styles().1)`
+            // ——`style_ex` 是按 **tao 内部记录的 flags** 重新拼出来的。而我们切换置顶时刻意
+            // 绕开 tao 直接调 SetWindowPos（tao 的 set_always_on_top 带 SWP_ASYNCWINDOWPOS
+            // 且不带 SWP_NOOWNERZORDER），于是 tao 那边的 ALWAYS_ON_TOP 位永远是创建时的值。
+            // 之后任何一次 tao flags 重算（关到托盘再唤回 = set_visible、最小化等）都会拿旧
+            // 模型覆盖整条 exstyle，把 WS_EX_TOPMOST 悄悄抹掉，且没有任何路径会把它恢复
+            // ——`apply_pinned` 因为"值没变"直接返回，`raise_notes` 看到 has_topmost=false
+            // 就走 HWND_TOP。表现就是：数据里 pinned=true，窗口却沉在普通层，
+            // 诊断报「置顶一致」「置顶在最前」两条 violation。
+            //
+            // 实测日志（修复前）：`[trace-topmost] B old=0x40118 new=0x40110`。
+            //
+            // 这里把 styleNew 的该位锁成 styleOld 的值，等价于"除我们自己以外改不动置顶位"。
+            if wparam.0 as i32 == GWL_EXSTYLE.0 && !SELF_ZORDER.load(Ordering::SeqCst) {
+                let ss = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::STYLESTRUCT;
+                if !ss.is_null() {
+                    unsafe {
+                        let keep = (*ss).styleOld & (WS_EX_TOPMOST.0 as u32);
+                        (*ss).styleNew = ((*ss).styleNew & !(WS_EX_TOPMOST.0 as u32)) | keep;
+                    }
+                }
             }
         }
         WM_WINDOWPOSCHANGING => {

@@ -785,10 +785,12 @@ fn run_cli_after_note(app: &AppHandle, command: &cli::Cli) {
     if command.raise_all {
         #[cfg(windows)]
         {
-            // 等价于点托盘左键：走同一条 `raise_notes` 路径，脚本不必去点托盘
-            let windows = note_windows_in_store_order(app);
-            let raised = win_desktop_pin::raise_notes(&windows);
-            let line = format!("已把 {raised} 张便签抬到前台应用之上");
+            // 等价于点托盘左键：走同一条 `show_all_notes` 路径，脚本不必去点托盘。
+            //
+            // 注意**不能**只调 `raise_notes`：它只处理"已经存在且可见"的窗口，
+            // 收进托盘的便签（hide 过）会被漏掉，表现为"点了显示全部，那张还是不出来"。
+            show_all_notes(app);
+            let line = "已把所有便签抬到前台应用之上（含从托盘唤回）".to_string();
             println!("[diag] {line}");
             diagnostics::console_notice(&line);
         }

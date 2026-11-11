@@ -107,6 +107,20 @@ public static class StickyCheckNative
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, System.Text.StringBuilder buf, int len);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindowLongPtrW(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    // 模拟"点右上角关闭"：应用侧把 CloseRequested 变成 hide()，正是 tao 重写 exstyle 的入口。
+    // 用 PostMessage 而不是 SendMessage，避免在脚本里同步等待目标线程。
+    public static bool PostClose(IntPtr h) { return PostMessageW(h, 0x0010, IntPtr.Zero, IntPtr.Zero); }
+
+    // 与 Rust 侧 has_topmost 同一口径：直接读 WS_EX_TOPMOST 位，不看任何 JSON
+    public static bool HasTopmost(IntPtr h)
+    {
+        const int GWL_EXSTYLE = -20;
+        const long WS_EX_TOPMOST = 0x8;
+        return ((long)GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    }
 
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -407,7 +421,7 @@ function Get-ForegroundInfo {
 # ---------------------------------------------------------------- 场景
 
 function Step-Baseline {
-    Write-Step '场景 1/8：基线（便签数 ≥ 2 + 六条不变量）'
+    Write-Step '场景 1/9：基线（便签数 ≥ 2 + 六条不变量）'
 
     $check = Invoke-StickyCheck
     $dump = Read-Dump
@@ -441,7 +455,7 @@ function Step-Baseline {
 }
 
 function Step-ForegroundCover {
-    Write-Step '场景 2/8：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
+    Write-Step '场景 2/9：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
 
     # 先垫底，给"未置顶便签不得压住前台"一个确定起点
     Invoke-SinkNotes | Out-Null
@@ -458,7 +472,7 @@ function Step-ForegroundCover {
 }
 
 function Step-TogglePin {
-    Write-Step '场景 3/8：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
+    Write-Step '场景 3/9：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
 
     $dump = Read-Dump
     $sorted = @($dump.notes | Sort-Object id)
@@ -517,7 +531,7 @@ function Read-NoteDump {
 # 会牵动同一个 owner 组（owner = Progman）的兄弟窗口。
 # 新实现不调 tao，所有 z 序动作都显式带 SWP_NOOWNERZORDER，并由 reconcile 全量重排。
 function Step-UnpinIsolation {
-    Write-Step '场景 4/8：取消置顶不影响兄弟（兄弟不得被连带拉起）'
+    Write-Step '场景 4/9：取消置顶不影响兄弟（兄弟不得被连带拉起）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -556,7 +570,7 @@ function Step-UnpinIsolation {
 }
 
 function Step-SiblingIsolation {
-    Write-Step '场景 5/8：兄弟不连坐（一钉一不钉，切 2 轮）'
+    Write-Step '场景 5/9：兄弟不连坐（一钉一不钉，切 2 轮）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -599,7 +613,7 @@ function Step-SiblingIsolation {
 # 重新排一遍 z 序，B 于是被 SetWindowPos(HWND_TOP) 顶上去。
 # 现在激活路径什么都不做，所以断言很硬：激活前后 B 的 z 序号必须一模一样。
 function Step-ActivationIsolation {
-    Write-Step '场景 6/8：激活 A 完全不改变 B（点击隔离）'
+    Write-Step '场景 6/9：激活 A 完全不改变 B（点击隔离）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -649,7 +663,7 @@ function Step-ActivationIsolation {
 }
 
 function Step-RaiseAll {
-    Write-Step '场景 7/8：托盘抬升等价路径（--raise-all）'
+    Write-Step '场景 7/9：托盘抬升等价路径（--raise-all）'
 
     $refHwnd = Get-NotepadHwnd
     Invoke-SinkNotes | Out-Null
@@ -700,8 +714,88 @@ function Step-RaiseAll {
     Add-Result '托盘抬升：之后没有便签被踩回记事本之下' ($bad2.Count -eq 0) ($(if ($bad2.Count -gt 0) { $bad2 -join '；' } else { ($checked2 -join '、') + ('；记事本 z={0}' -f $again.RefZ) }))
 }
 
+function Step-TrayRoundTrip {
+    Write-Step '场景 8/9：关到托盘再唤回，置顶位不得丢失'
+
+    # 这条是「数据 pinned=true、窗口 topmost=false」的唯一来源。
+    #
+    # 链路：点关闭（或托盘"隐藏全部"）→ tao set_visible(false) → tao 的 apply_diff 收尾无条件
+    # 执行 SetWindowLongW(GWL_EXSTYLE, new.to_window_styles().1)，而 style_ex 是按 tao **内部**
+    # 记录的 flags 重拼的。我们切换置顶刻意绕开 tao（它的 set_always_on_top 带
+    # SWP_ASYNCWINDOWPOS 且不带 SWP_NOOWNERZORDER），所以 tao 内部那一位永远是创建时的值。
+    # 于是唤回时 WS_EX_TOPMOST 被抹掉，之后 raise_notes 看到 has_topmost=false 走 HWND_TOP，
+    # 便签就沉在浏览器后面，而 store 里仍写着 pinned=true。
+    #
+    # 修复在 win_desktop_pin 的 WM_STYLECHANGING 里把该位锁成 styleOld 的值。
+    $dump = Read-NoteDump
+    $sorted = @($dump.notes | Sort-Object id)
+    if ($sorted.Count -lt 2) {
+        Add-Result '托盘往返 前置：至少 2 张便签' $false '需要 2 张便签'
+        return
+    }
+    $a = $sorted[0].id
+    $b = $sorted[1].id
+
+    Set-PinsExact -PinnedId $a -UnpinnedId $b
+    $dump0 = Read-Dump
+    $wA0 = Get-WindowOf -Dump $dump0 -NoteId $a
+    $wB0 = Get-WindowOf -Dump $dump0 -NoteId $b
+    Add-Result '托盘往返 前置：A 已置顶、B 未置顶' `
+        (([bool]$wA0.topmost) -and (-not [bool]$wB0.topmost)) `
+        ("A topmost={0} exstyle={1}；B topmost={2} exstyle={3}" -f $wA0.topmost, $wA0.exstyle, $wB0.topmost, $wB0.exstyle)
+
+    # 关掉置顶那张（收进托盘），再走托盘"显示全部"把它叫回来
+    $hwndA = [IntPtr][int64]$wA0.hwnd
+    $posted = [StickyCheckNative]::PostClose($hwndA)
+    Add-Result '托盘往返：已向 A 发出关闭（= 收进托盘）' $posted ("PostMessage(WM_CLOSE, hwnd={0})" -f $hwndA)
+
+    $hidden = $false
+    foreach ($i in 1..20) {
+        Start-Sleep -Milliseconds 50
+        if (-not [StickyCheckNative]::IsWindowVisible($hwndA)) { $hidden = $true; break }
+    }
+    Add-Result '托盘往返：A 确实被隐藏了' $hidden '等待 IsWindowVisible=false'
+
+    Invoke-RaiseAll | Out-Null
+    Start-Sleep -Milliseconds 250
+
+    # 真正要断言的两件事，都直接读窗口，不信任何 JSON
+    $topmostKept = [StickyCheckNative]::HasTopmost($hwndA)
+    Add-Result '托盘往返：唤回后 A 的 WS_EX_TOPMOST 仍在' $topmostKept `
+        ("HasTopmost=({0})" -f $topmostKept)
+
+    # show_all_notes 是异步 spawn 的：--raise-all 触发的那份 dump 可能早于窗口重建完成，
+    # 必须重新采一次，直到 A 的窗口真的回来（最多等 3 秒）。
+    $wA1 = $null
+    foreach ($i in 1..12) {
+        $dump1 = Invoke-StickyDump
+        $wA1 = @($dump1.windows | Where-Object { $_.note_id -eq $a }) | Select-Object -First 1
+        if ($null -ne $wA1 -and [bool]$wA1.visible) { break }
+        Start-Sleep -Milliseconds 250
+        $wA1 = $null
+    }
+    Add-Result '托盘往返：A 的窗口被重新建出来且可见' ($null -ne $wA1) `
+        $(if ($null -ne $wA1) { "hwnd={0} exstyle={1} topmost={2}" -f $wA1.hwnd, $wA1.exstyle, $wA1.topmost } else { '等不到 A 的窗口' })
+
+    if ($null -ne $wA1) {
+        Add-Result '托盘往返：重建后 A 仍是 TOPMOST（数据与窗口一致）' ([bool]$wA1.topmost) `
+            ("A exstyle={0} topmost={1}" -f $wA1.exstyle, $wA1.topmost)
+    }
+
+    Start-ForegroundApp | Out-Null
+    $dump2 = Invoke-StickyDump
+    $snap = Get-ZSnapshot -Dump $dump2 -RefHwnd (Get-NotepadHwnd)
+    $aZ = if ($snap.NoteZ.ContainsKey($a)) { [int]$snap.NoteZ[$a] } else { $null }
+    $inFront = ($null -ne $aZ) -and ($null -ne $snap.RefZ) -and ($aZ -lt [int]$snap.RefZ)
+    Add-Result '托盘往返：置顶的那张仍在记事本之上' $inFront `
+        ("A z={0} 记事本 z={1}" -f $aZ, $snap.RefZ)
+
+    $script:ChangedPins[$a] = $true
+    $script:ChangedPins[$b] = $true
+}
+
 function Step-RestartConsistency {
-    Write-Step '场景 8/8：重启一致性（置顶状态与 store 一致）'
+    Write-Step '场景 9/9：重启一致性（置顶状态与 store 一致）'
 
     $dump = Read-Dump
     $pinsBefore = Get-PinMap $dump
@@ -832,8 +926,9 @@ try {
     Step-SiblingIsolation
     Step-ActivationIsolation
     Step-RaiseAll
+    Step-TrayRoundTrip
     if ($SkipRestart) {
-        Write-Step '场景 8/8：重启一致性 —— 已按 -SkipRestart 跳过'
+        Write-Step '场景 9/9：重启一致性 —— 已按 -SkipRestart 跳过'
     } else {
         Step-RestartConsistency
     }
