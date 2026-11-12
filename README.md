@@ -474,6 +474,45 @@ SetWindowLongW(hwnd, GWL_EXSTYLE, style_ex);  // 直接覆盖整条 exstyle
 
 `powershell -File scripts\check-zorder.ps1` → **38/38 通过**（9 个场景），连跑 3 次一致。
 
+### 0.4.5 Win+D 恢复窗口会清掉置顶位（2026-11-12）
+
+用户报障：「我在桌面按 Ctrl + D，置顶就失效了」，并导出 `%TEMP%\sticky-dump.json`：
+A 的 `pinned=true` 但 `exstyle=0x40110`（无 `WS_EX_TOPMOST`）。
+
+**实测定位到不是 Ctrl+D，是 Win+D 第二次（从桌面恢复窗口）。** 按键序列逐帧采样：
+
+```
+0 已置顶              A topmost=True  ex=0x40118
+1 Win+D（显示桌面）    A topmost=True  ex=0x40118   ← 没问题
+2 Ctrl+D（桌面焦点）   A topmost=True  ex=0x40118   ← 没问题
+3 Win+D（恢复窗口）    A topmost=False ex=0x40110   ← 位在这里被清掉 ★
+5 Ctrl+D 再来一次      A topmost=False              ← 已丢失，看起来像 Ctrl+D 干的
+```
+
+临时给窗口过程加 trace，抓到恢复瞬间的消息：
+
+```
+[tz] CHANGING topmost=true  after=527078 flags=0x13 self=false
+[tz] CHANGED  topmost=false
+```
+
+`after` 是**具体 HWND**，不是 `HWND_NOTOPMOST`。shell 恢复窗口时把便签插回普通层，
+这个 `WM_WINDOWPOSCHANGING` 会连带清掉 `WS_EX_TOPMOST`，而且**不经过
+`WM_STYLECHANGING`** —— 所以 0.4.4 在样式变更里加的那把锁完全挡不住。
+
+而 `should_freeze()` 里有一条 `if has_topmost(hwnd) { return false; }`
+（"置顶窗口本来就该在最前，一律放行"），正好让这条消息长驱直入。
+
+修法：去掉这条放行，让**置顶窗口也接受 `SWP_NOZORDER` 冻结**。冻结只是让它原地不动，
+置顶窗口本来就在最前，没有任何视觉副作用。另加一条 `HWND_NOTOPMOST` 精确拦截作双保险
+（独立窗口实测：带 `SWP_NOZORDER` 时 `HWND_NOTOPMOST` 不再清位，不带则清掉）。
+
+回归新增场景 9「Win+D 显示桌面再恢复」——连做 2 轮，每轮直接读窗口的
+`WS_EX_TOPMOST` 位，不通过任何 JSON 判断。这是第二次有 bug 从「桌面/托盘往返」
+这类路径漏进来，现在两条都固化了。
+
+`powershell -File scripts\check-zorder.ps1` → **45/45 通过**（10 个场景），连跑 3 次一致。
+
 
 ## 启动速度怎么测
 

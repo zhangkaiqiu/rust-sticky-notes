@@ -243,9 +243,21 @@ unsafe extern "system" fn note_wndproc(
             }
         }
         WM_WINDOWPOSCHANGING => {
-            if should_freeze(hwnd) {
-                let pos = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::WINDOWPOS;
-                if !pos.is_null() {
+            // Win+D 第二次（从桌面恢复窗口）时，shell 会给每个窗口发一条
+            // `hwndInsertAfter = HWND_NOTOPMOST` 的 WM_WINDOWPOSCHANGING。这个动作会**直接**
+            // 清掉 WS_EX_TOPMOST 位，且不经过 WM_STYLECHANGING，所以上面那把样式锁挡不住它。
+            //
+            // 实测（独立窗口验证）：
+            //   SetWindowPos(HWND_NOTOPMOST, SWP_NOMOVE|NOSIZE|NOACTIVATE)          -> ex 0x50108 -> 0x50100
+            //   SetWindowPos(HWND_NOTOPMOST, ... | SWP_NOZORDER)                     -> ex 0x50108 保持不变
+            //
+            // 只有"外部发起的降级"要拦；我们自己的 set_user_pinned(false) 走 place()，
+            // 期间 SELF_ZORDER 为 true，照样能正常取消置顶。
+            let pos = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::WINDOWPOS;
+            if !pos.is_null() {
+                let external_demote = !SELF_ZORDER.load(Ordering::SeqCst)
+                    && unsafe { (*pos).hwndInsertAfter } == HWND_NOTOPMOST;
+                if external_demote || should_freeze(hwnd) {
                     unsafe {
                         (*pos).flags |= SWP_NOZORDER;
                     }
@@ -264,15 +276,20 @@ unsafe extern "system" fn note_wndproc(
 }
 
 /// 这次 z 序改动是否"与这张便签无关"，该原封不动地拦下来
+///
+/// **置顶窗口也照样冻结**：Win+D 第二次（从桌面恢复窗口）时 shell 会给每个窗口发一条
+/// `hwndInsertAfter = <某个具体 hwnd>` 的 WM_WINDOWPOSCHANGING，把窗口插回普通层；这个
+/// 动作会连带清掉 `WS_EX_TOPMOST`，而且**不经过 WM_STYLECHANGING**，所以样式锁挡不住。
+/// 实测 trace（0.4.4 在 `has_topmost` 处直接放行，漏掉了这条）：
+///   `[tz] CHANGING topmost=true  after=527078 flags=0x13 self=false`
+///   `[tz] CHANGED  topmost=false`
+/// 冻结置顶窗口没有视觉副作用——它本来就在最前，原地不动即可。
 fn should_freeze(hwnd: HWND) -> bool {
     if SELF_ZORDER.load(Ordering::Relaxed) {
         return false; // 我们自己要改
     }
     if now_ms() < QUIET_UNTIL_MS.load(Ordering::Relaxed) {
         return false; // 托盘"显示全部"刚抬过
-    }
-    if has_topmost(hwnd) {
-        return false; // 置顶窗口本来就在最前
     }
     if unsafe { GetForegroundWindow() } == hwnd {
         return false; // 它就是前台
