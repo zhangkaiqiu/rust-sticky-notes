@@ -49,7 +49,7 @@
 //! explorer.exe 重启后 `Progman` 句柄变化，owner 绑定失效（便签退回普通窗口，Win+D 期间
 //! 会被桌面盖住；`find_progman` 静默跳过）。重启便签即可恢复。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{Runtime, WebviewWindow};
@@ -57,11 +57,11 @@ use windows::core::w;
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow,
-    GetPropW, GetWindowLongPtrW, SetPropW, SetWindowLongPtrW, SetWindowPos, WindowFromPoint,
-    GWL_EXSTYLE, GWLP_HWNDPARENT, GWLP_WNDPROC, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP,
-    HWND_TOPMOST, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_NOZORDER, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WNDPROC,
-    WS_EX_TOPMOST,
+    GetPropW, GetWindowLongPtrW, RegisterWindowMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos,
+    WindowFromPoint, GWL_EXSTYLE, GWLP_HWNDPARENT, GWLP_WNDPROC, HWND_BOTTOM, HWND_NOTOPMOST,
+    HWND_TOP, HWND_TOPMOST, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+    SWP_NOSIZE, SWP_NOZORDER, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_STYLECHANGING,
+    WM_WINDOWPOSCHANGING, WNDPROC, WS_EX_TOPMOST,
 };
 
 /// 原窗口过程存在窗口属性里（不走全局表，销毁时随窗口一起消失）
@@ -74,6 +74,12 @@ static SELF_ZORDER: AtomicBool = AtomicBool::new(false);
 
 /// 「抬升全部」的豁免截止时刻（ms）：托盘一次抬起所有便签，这期间的 z 序改动都该放行
 static QUIET_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+/// explorer.exe 重启后广播的 "TaskbarCreated" 消息 id。
+///
+/// 每个进程的 id 不同，必须运行时 `RegisterWindowMessageW("TaskbarCreated")` 拿。
+/// 收到它说明桌面（Progman）已经换了新句柄，必须重新绑 owner，否则抗 Win+D 失效。
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 /// 鼠标按下之后多久内允许自由改 z 序（覆盖"按下 → 激活 → 系统抬组"这段时序）
 const PRESS_GRACE_MS: u64 = 800;
@@ -97,13 +103,23 @@ pub fn install<R: Runtime>(window: &WebviewWindow<R>) {
     };
     let hwnd = HWND(raw.0 as *mut core::ffi::c_void);
 
+    bind_owner(hwnd);
+    unsafe {
+        install_hook(hwnd);
+    }
+}
+
+/// 把桌面窗口设成便签的 owner（抗 Win+D 的唯一机制）。
+///
+/// explorer.exe 重启后旧 Progman 句柄失效，必须重新绑到新句柄；否则便签退回普通窗口，
+/// Win+D 时被桌面盖住（实测：owner=0 时 `topmost` 仍为 true，但抗 Win+D 失效）。
+fn bind_owner(hwnd: HWND) {
     let Some(progman) = find_progman() else {
         eprintln!("[desktop-bind] 找不到 Progman，跳过桌面绑定");
         return;
     };
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, progman.0 as isize);
-        install_hook(hwnd);
     }
 }
 
@@ -189,6 +205,13 @@ pub fn is_always_on_top<R: Runtime>(window: &WebviewWindow<R>) -> bool {
 
 /// 把窗口过程换成 `note_wndproc`，原过程存进窗口属性
 unsafe fn install_hook(hwnd: HWND) {
+    // explorer 重启后要靠这条广播重新绑 owner（只需注册一次，id 全进程一致）
+    let _ = TASKBAR_CREATED.compare_exchange(
+        0,
+        unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+        Ordering::SeqCst,
+        Ordering::Relaxed,
+    );
     let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, note_wndproc as *const () as usize as isize) };
     if previous != 0 {
         unsafe {
@@ -204,6 +227,12 @@ unsafe extern "system" fn note_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // explorer.exe 重启 → 新的 Progman 句柄 → 重新绑 owner，否则抗 Win+D 失效
+    let created = TASKBAR_CREATED.load(Ordering::Relaxed);
+    if created != 0 && msg == created {
+        bind_owner(hwnd);
+    }
+
     match msg {
         WM_MOUSEACTIVATE | WM_LBUTTONDOWN => {
             // 激活发生在系统抬组之前，先记下"用户刚碰过这张"，后续 z 序改动一律放行
@@ -226,12 +255,9 @@ unsafe extern "system" fn note_wndproc(
             // 之后任何一次 tao flags 重算（关到托盘再唤回 = set_visible、最小化等）都会拿旧
             // 模型覆盖整条 exstyle，把 WS_EX_TOPMOST 悄悄抹掉，且没有任何路径会把它恢复
             // ——`apply_pinned` 因为"值没变"直接返回，`raise_notes` 看到 has_topmost=false
-            // 就走 HWND_TOP。表现就是：数据里 pinned=true，窗口却沉在普通层，
-            // 诊断报「置顶一致」「置顶在最前」两条 violation。
+            // 就走 HWND_TOP。表现就是：数据里 pinned=true，窗口却沉在普通层。
             //
             // 实测日志（修复前）：`[trace-topmost] B old=0x40118 new=0x40110`。
-            //
-            // 这里把 styleNew 的该位锁成 styleOld 的值，等价于"除我们自己以外改不动置顶位"。
             if wparam.0 as i32 == GWL_EXSTYLE.0 && !SELF_ZORDER.load(Ordering::SeqCst) {
                 let ss = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::STYLESTRUCT;
                 if !ss.is_null() {
@@ -243,21 +269,45 @@ unsafe extern "system" fn note_wndproc(
             }
         }
         WM_WINDOWPOSCHANGING => {
-            // Win+D 第二次（从桌面恢复窗口）时，shell 会给每个窗口发一条
-            // `hwndInsertAfter = HWND_NOTOPMOST` 的 WM_WINDOWPOSCHANGING。这个动作会**直接**
-            // 清掉 WS_EX_TOPMOST 位，且不经过 WM_STYLECHANGING，所以上面那把样式锁挡不住它。
+            // 这里是「置顶位不被抹掉」的最后一道、也是唯一完整的一道防线。
             //
-            // 实测（独立窗口验证）：
-            //   SetWindowPos(HWND_NOTOPMOST, SWP_NOMOVE|NOSIZE|NOACTIVATE)          -> ex 0x50108 -> 0x50100
-            //   SetWindowPos(HWND_NOTOPMOST, ... | SWP_NOZORDER)                     -> ex 0x50108 保持不变
+            // 实测：抛掉 WM_STYLECHANGING 那条路径（已被上面的锁挡住）之后，还有一条
+            // 完全不同的路径能清掉 WS_EX_TOPMOST —— 外部（shell / explorer / 任何进程）
+            // 调 SetWindowPos，目标插入位置是**具体 HWND**而不是 HWND_NOTOPMOST：
             //
-            // 只有"外部发起的降级"要拦；我们自己的 set_user_pinned(false) 走 place()，
-            // 期间 SELF_ZORDER 为 true，照样能正常取消置顶。
+            //   [wz] CHANGING top=true after=919580 flags=0x13 self=false
+            //   [wz] -> freeze=false            ← 没拦住
+            //   [wz] CHANGED top=false          ← 位被清掉
+            //
+            // 之前只精确匹配 `hwndInsertAfter == HWND_NOTOPMOST`，认不出"插到某个具体
+            // HWND 之后"也会掉出置顶层，所以漏掉了。而 should_freeze 又有几条放行口子
+            // （前台窗口 / 鼠标正压着 / 刚按过），一旦命中同样漏 —— 这就是"偶发、要跑满
+            // 几小时才出现一次"的原因：取决于那一刻鼠标和焦点在哪。
+            //
+            // 结论：对**置顶窗口**不再逐条判断放行条件，直接定一条铁律——
+            //   只要这次 z 序改动不是我们自己发起的、且插入目标不是 HWND_TOPMOST，
+            //   就加 SWP_NOZORDER 原地冻结。
+            // 置顶窗口本来就该待在最顶层，被插到任何别处都是错的；原地不动没有视觉副作用。
+            // 我们自己的 place() 期间 SELF_ZORDER 为 true，所以 set_user_pinned(false)
+            // 依然能正常取消置顶。
             let pos = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::WINDOWPOS;
             if !pos.is_null() {
-                let external_demote = !SELF_ZORDER.load(Ordering::SeqCst)
-                    && unsafe { (*pos).hwndInsertAfter } == HWND_NOTOPMOST;
-                if external_demote || should_freeze(hwnd) {
+                let pos_ref = unsafe { &*pos };
+                let self_initiated = SELF_ZORDER.load(Ordering::SeqCst);
+                let after = pos_ref.hwndInsertAfter;
+
+                let protect_pin = !self_initiated && has_topmost(hwnd) && after != HWND_TOPMOST;
+
+                // 非置顶窗口继续走原有的"别被牵连抬到前台"判据
+                let freeze = if self_initiated {
+                    false
+                } else if protect_pin {
+                    true
+                } else {
+                    should_freeze(hwnd)
+                };
+
+                if freeze {
                     unsafe {
                         (*pos).flags |= SWP_NOZORDER;
                     }

@@ -513,6 +513,52 @@ A 的 `pinned=true` 但 `exstyle=0x40110`（无 `WS_EX_TOPMOST`）。
 
 `powershell -File scripts\check-zorder.ps1` → **45/45 通过**（10 个场景），连跑 3 次一致。
 
+### 0.4.6 置顶位又被抹掉：认不出「插到具体 HWND 之后」（2026-11-12）
+
+用户跑满 6.5 小时后又报同一个症状，导出的 dump 依旧是 `pinned=true` 但 `exstyle=0x40110`。
+这次窗口还被拖动过（`bounds` 变了），于是先把「拖动 / 折叠 / 悬停 / 点按 / Alt+Tab /
+任务栏显示桌面 / Win+M / 虚拟桌面」逐条用真实鼠标键盘重放了一遍——**全部没复现**。
+
+改用「模拟外部攻击」才定位到：直接对一个已置顶的便签调
+`SetWindowPos(HWND_NOTOPMOST)`，一次就把位清掉了。加 trace 后看到真相：
+
+```
+[wz] CHANGING top=true  after=919580 flags=0x13 self=false
+[wz] -> freeze=false                  ← 没拦住
+[wz] CHANGED  top=false               ← 位被清掉
+```
+
+0.4.5 只精确匹配 `hwndInsertAfter == HWND_NOTOPMOST`（-2），而实际消息里的
+`after` 是**具体 HWND**——「插到某个窗口之后」同样会让便签掉出置顶层、连带清掉
+`WS_EX_TOPMOST`。加上 `should_freeze` 里还有几条放行口子（前台窗口 / 鼠标正压着 /
+刚按过），一旦命中就漏。这正好解释「偶发、要跑几小时才出现一次」：取决于那一刻
+鼠标和焦点在哪。
+
+修法：对**置顶窗口**不再逐条判断放行条件，直接定一条铁律——
+
+> 只要这次 z 序改动不是我们自己发起、且插入目标不是 `HWND_TOPMOST`，就加
+> `SWP_NOZORDER` 原地冻结。
+
+置顶窗口本来就该待在最顶层，被插到任何别处都是错的；原地不动没有视觉副作用。
+我们自己的 `place()` 期间 `SELF_ZORDER` 为真，所以 `set_user_pinned(false)` 照常生效。
+
+**同时修掉一个长期潜伏的缺陷**：`explorer.exe` 重启后 Progman 换了新句柄，owner 绑定
+失效——置顶位还在，但抗 Win+D 失效（Win+D 时被桌面盖住），表现极像「置顶失效」。
+现在在窗口过程里处理 `TaskbarCreated` 广播自动重绑。实测：杀掉 explorer 后 owner
+从旧句柄自动改绑到新 Progman（`132258 → 331112`），置顶位保持 `0x40118`。
+
+攻击矩阵（全部被挡住，6/6）：`SetWindowLongPtr` 清位、`HWND_NOTOPMOST`、
+`HWND_BOTTOM`、`HWND_TOP`、伪造 `WM_STYLECHANGED`、`TOPMOST→NOTOPMOST` 组合。
+反向也验过：取消置顶 / 重新置顶仍然正常生效，没有把功能锁死。
+
+计算机操作验证（真实鼠标键盘，13 组）：Win+D 多轮、任务栏「显示桌面」、Win+M、
+Alt+Tab、鼠标悬停时 Win+D、点击后立即 Win+D、拖动窗口后 Win+D、UI 点图钉双向、
+折叠/展开、折叠态 Win+D、3 窗口叠加、explorer 重启。全程 300 秒后台监控
+`WS_EX_TOPMOST` 位，除我自己刻意切换置顶外**零意外翻转**。
+
+回归新增场景 10「owner 链完好」（只读断言，不重启 explorer），
+`powershell -File scripts\check-zorder.ps1` → **46/46 通过**（11 个场景），连跑 3 次一致。
+
 
 ## 启动速度怎么测
 

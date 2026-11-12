@@ -434,7 +434,7 @@ function Get-ForegroundInfo {
 # ---------------------------------------------------------------- 场景
 
 function Step-Baseline {
-    Write-Step '场景 1/10：基线（便签数 ≥ 2 + 六条不变量）'
+    Write-Step '场景 1/11：基线（便签数 ≥ 2 + 六条不变量）'
 
     $check = Invoke-StickyCheck
     $dump = Read-Dump
@@ -468,7 +468,7 @@ function Step-Baseline {
 }
 
 function Step-ForegroundCover {
-    Write-Step '场景 2/10：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
+    Write-Step '场景 2/11：前台覆盖（先沉底，未置顶便签不得压住前台应用）'
 
     # 先垫底，给"未置顶便签不得压住前台"一个确定起点
     Invoke-SinkNotes | Out-Null
@@ -485,7 +485,7 @@ function Step-ForegroundCover {
 }
 
 function Step-TogglePin {
-    Write-Step '场景 3/10：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
+    Write-Step '场景 3/11：--set-pin 切换置顶（置顶生效 / 取消置顶不沉降）'
 
     $dump = Read-Dump
     $sorted = @($dump.notes | Sort-Object id)
@@ -544,7 +544,7 @@ function Read-NoteDump {
 # 会牵动同一个 owner 组（owner = Progman）的兄弟窗口。
 # 新实现不调 tao，所有 z 序动作都显式带 SWP_NOOWNERZORDER，并由 reconcile 全量重排。
 function Step-UnpinIsolation {
-    Write-Step '场景 4/10：取消置顶不影响兄弟（兄弟不得被连带拉起）'
+    Write-Step '场景 4/11：取消置顶不影响兄弟（兄弟不得被连带拉起）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -583,7 +583,7 @@ function Step-UnpinIsolation {
 }
 
 function Step-SiblingIsolation {
-    Write-Step '场景 5/10：兄弟不连坐（一钉一不钉，切 2 轮）'
+    Write-Step '场景 5/11：兄弟不连坐（一钉一不钉，切 2 轮）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -626,7 +626,7 @@ function Step-SiblingIsolation {
 # 重新排一遍 z 序，B 于是被 SetWindowPos(HWND_TOP) 顶上去。
 # 现在激活路径什么都不做，所以断言很硬：激活前后 B 的 z 序号必须一模一样。
 function Step-ActivationIsolation {
-    Write-Step '场景 6/10：激活 A 完全不改变 B（点击隔离）'
+    Write-Step '场景 6/11：激活 A 完全不改变 B（点击隔离）'
 
     $dump = Read-NoteDump
     $sorted = @($dump.notes | Sort-Object id)
@@ -676,7 +676,7 @@ function Step-ActivationIsolation {
 }
 
 function Step-RaiseAll {
-    Write-Step '场景 7/10：托盘抬升等价路径（--raise-all）'
+    Write-Step '场景 7/11：托盘抬升等价路径（--raise-all）'
 
     $refHwnd = Get-NotepadHwnd
     Invoke-SinkNotes | Out-Null
@@ -728,7 +728,7 @@ function Step-RaiseAll {
 }
 
 function Step-TrayRoundTrip {
-    Write-Step '场景 8/10：关到托盘再唤回，置顶位不得丢失'
+    Write-Step '场景 8/11：关到托盘再唤回，置顶位不得丢失'
 
     # 这条是「数据 pinned=true、窗口 topmost=false」的唯一来源。
     #
@@ -808,7 +808,7 @@ function Step-TrayRoundTrip {
 }
 
 function Step-WinDRoundTrip {
-    Write-Step '场景 9/10：Win+D 显示桌面再恢复，置顶位不得丢失'
+    Write-Step '场景 9/11：Win+D 显示桌面再恢复，置顶位不得丢失'
 
     # 用户报障：「在桌面按 Ctrl+D，置顶就失效了」。实测定位到**不是 Ctrl+D**，
     # 而是 Win+D 第二次（从桌面恢复窗口）：shell 给每个窗口发一条
@@ -868,8 +868,22 @@ function Step-WinDRoundTrip {
     if ($null -ne $b) { $script:ChangedPins[$b] = $true }
 }
 
+function Step-OwnerBinding {
+    Write-Step '场景 10/11：owner 链完好（抗 Win+D 的前提）'
+
+    # 这条只做只读断言，不重启 explorer（那会把用户桌面掀翻）。
+    # explorer 重启后的自动重绑在 win_desktop_pin 的 TaskbarCreated 处理里，
+    # 用真实重启验证过一次：owner 从旧 Progman 自动改绑到新句柄，置顶位保持。
+    # 这里守住的是"平时的 owner 不能悄悄掉"——掉了 Win+D 抗性就没了，
+    # 表现和"置顶失效"极像，很容易被误判成本次那个 topmost 的 bug。
+    $check = Invoke-StickyCheck
+    Add-Result 'owner 链指向 Progman（抗 Win+D 生效）' `
+        (Test-CheckPassed -Check $check -Id 'owner_progman') `
+        (Describe-Check -Check $check -Id 'owner_progman')
+}
+
 function Step-RestartConsistency {
-    Write-Step '场景 10/10：重启一致性（置顶状态与 store 一致）'
+    Write-Step '场景 11/11：重启一致性（置顶状态与 store 一致）'
 
     $dump = Read-Dump
     $pinsBefore = Get-PinMap $dump
@@ -1002,8 +1016,9 @@ try {
     Step-RaiseAll
     Step-TrayRoundTrip
     Step-WinDRoundTrip
+    Step-OwnerBinding
     if ($SkipRestart) {
-        Write-Step '场景 10/10：重启一致性 —— 已按 -SkipRestart 跳过'
+        Write-Step '场景 11/11：重启一致性 —— 已按 -SkipRestart 跳过'
     } else {
         Step-RestartConsistency
     }
