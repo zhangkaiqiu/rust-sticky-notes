@@ -80,7 +80,7 @@ npm run tauri build -- --no-bundle
 产物：
 
 - 可执行文件：`src-tauri/target/release/rust-sticky-notes.exe`
-- 安装包（去掉 `--no-bundle` 时）：`src-tauri/target/release/bundle/nsis/Rust Sticky Notes_0.3.0_x64-setup.exe`
+- 安装包（去掉 `--no-bundle` 时）：`src-tauri/target/release/bundle/nsis/Rust_Sticky_Notes_0.4.6_x64-setup.exe`
 
 **必须走 Tauri CLI**：直接 `cargo build --release` 不会带上 `custom-protocol` 特性，
 打出来的 exe 会去连 `localhost:1420`，显示"无法访问此页面"。
