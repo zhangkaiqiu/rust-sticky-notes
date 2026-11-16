@@ -7,7 +7,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
  * - 用 `position: fixed` + clientX/clientY 定位；
  * - 贴近窗口右 / 下边缘时自动翻转，保证菜单完整可见；
  * - 点外部、Esc、滚动、窗口失焦 / 尺寸变化都关闭；
- * - 视觉沿用便签的暖色面板变量（note-panel）。
+ * - 视觉沿用便签卡片自己的表面色（--note-surface，经由 .note-panel 引用）。
  */
 
 export type ContextMenuItem =

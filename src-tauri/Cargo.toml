@@ -1,6 +1,6 @@
 [package]
 name = "rust-sticky-notes"
-version = "0.4.6"
+version = "0.5.0"
 description = "A lightweight Windows desktop sticky note"
 authors = ["rust-sticky-notes"]
 edition = "2021"

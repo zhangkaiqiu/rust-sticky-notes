@@ -87,7 +87,7 @@ export default function TodoList({
 
             <button
               type="button"
-              title="删除"
+              aria-label="删除待办"
               onClick={() => onRemove(item.id)}
               className="note-faint note-danger-hover shrink-0 rounded p-0.5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
             >

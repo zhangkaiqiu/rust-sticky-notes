@@ -72,16 +72,10 @@
   color: rgb(var(--note-muted) / 0.62);
 }
 
-/* 顶部可编辑标题 */
-.note-title-btn {
+/* 顶部标题：纯展示文本（不可编辑，改名在设置面板里），
+ * 所以不需要 hover 底色 —— 任何"看起来能点"的暗示都是骗人的 */
+.note-title-label {
   color: rgb(var(--note-icon) / 0.45);
-  max-width: 12em;
-  transition: color 140ms ease-out, background-color 140ms ease-out;
-}
-
-.note-title-btn:hover {
-  color: rgb(var(--note-icon) / 0.72);
-  background-color: rgb(var(--note-icon) / calc(var(--note-alpha, 0.97) * 0.07));
 }
 
 .note-title-input {
@@ -179,8 +173,12 @@
   background-color: rgb(var(--note-danger) / 0.1);
 }
 
+/* 设置面板表面：与便签卡片**同一个色源**（--note-surface）。
+ * 以前面板另有一套"浮层色" --note-panel，是刻意调亮的，导致面板和便签只是接近、
+ * 永远不完全一样。既然面板是独立窗口、本来就有边框和阴影区分，
+ * 就不该再靠改颜色来制造层次，直接用便签自己的底色。 */
 .note-panel {
-  background-color: rgb(var(--note-panel) / var(--note-panel-alpha, 0.97));
+  background-color: rgb(var(--note-surface) / var(--note-panel-alpha, 0.97));
   border-color: rgb(var(--note-border) / 0.16);
 }
 

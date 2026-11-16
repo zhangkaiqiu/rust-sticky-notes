@@ -1,42 +1,46 @@
-import type { MouseEvent as ReactMouseEvent } from "react";
-import { useEffect, useRef, useState } from "react";
-import { ChevronIcon, GearIcon, PinIcon } from "./icons";
+import { useEffect, useState } from "react";
+import { ChevronIcon } from "./icons";
 
 type Props = {
   title: string;
-  pinned: boolean;
   collapsed: boolean;
   savedTick: number;
-  settingsOpen: boolean;
-  onTitleChange: (next: string) => void;
-  onTogglePin: () => void;
   onToggleCollapsed: () => void;
-  onToggleSettings: () => void;
-  /** 标题输入框右键 → 打开自定义菜单（剪切 / 复制 / 粘贴 / 全选） */
-  onFieldContextMenu: (event: ReactMouseEvent<HTMLElement>) => void;
 };
 
-/** 与 Rust 侧 `store::MAX_TITLE_CHARS` 保持一致 */
-const MAX_TITLE_CHARS = 60;
-const DEFAULT_TITLE = "便签";
+/**
+ * 标题栏高度（逻辑像素）。
+ *
+ * **这是唯一的几何事实源**，两处必须同源，否则一定出 bug：
+ * 1. 标题栏自身高度；
+ * 2. Rust 侧折叠态窗口高度（`lib.rs` 的 `COLLAPSED_HEIGHT`）。
+ *
+ * 之前浮动按钮组自己写死 `h-9`(36px)、标题栏是 40px，两者差 4px，
+ * 折叠切换时图钉和齿轮就会上下跳——这就是"多源几何"的典型代价。
+ * 现在高度一律引用这个常量，谁都不许再写字面量。
+ */
+export const BAR_HEIGHT = 40;
 
-/** 顶部条既是拖动区，也放标题 / 图钉 / 设置按钮 */
+/**
+ * 顶部条：整条都是拖动区，只有真正有交互的元素才拦下鼠标。
+ *
+ * 关于 `data-tauri-drag-region`（踩过的坑）：
+ * 这个属性**不会继承**。Tauri 只认鼠标按下时命中的那个元素有没有该属性，
+ * 所以标题、占位块这些子元素必须各自带上，否则它们覆盖的那块区域拖不动——
+ * 表现为"标题栏中间一大片是死区"。
+ *
+ * 判断规则（以后新增元素照此办理）：
+ * - 纯显示 / 占位 / 文字  → 带 `data-tauri-drag-region`，让窗口可拖；
+ * - 按钮这类有点击行为的 → **不带**，并在 `onMouseDown` 里 stopPropagation，
+ *   避免按下就被当成拖动。
+ */
 export default function TopBar({
   title,
-  pinned,
   collapsed,
   savedTick,
-  settingsOpen,
-  onTitleChange,
-  onTogglePin,
   onToggleCollapsed,
-  onToggleSettings,
-  onFieldContextMenu,
 }: Props) {
   const [justSaved, setJustSaved] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(title);
-  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (savedTick === 0) return;
@@ -45,50 +49,29 @@ export default function TopBar({
     return () => window.clearTimeout(t);
   }, [savedTick]);
 
-  // 进入编辑态后聚焦并全选，方便直接覆盖旧标题
-  useEffect(() => {
-    if (!editing) return;
-    const el = inputRef.current;
-    if (el) {
-      el.focus();
-      el.select();
-    }
-  }, [editing]);
-
-  const beginEdit = () => {
-    setDraft(title);
-    setEditing(true);
-  };
-
-  const commit = () => {
-    if (!editing) return;
-    const next = draft.trim().slice(0, MAX_TITLE_CHARS) || DEFAULT_TITLE;
-    setEditing(false);
-    setDraft(next);
-    if (next !== title) onTitleChange(next);
-  };
-
-  const cancel = () => {
-    setEditing(false);
-    setDraft(title);
-  };
-
   return (
     <div
       data-tauri-drag-region
-      className="flex h-9 shrink-0 select-none items-center gap-1 pl-1.5 pr-1.5"
+      style={{ height: BAR_HEIGHT }}
+      // 整条标题栏都不弹右键菜单（理由见下面标题处的注释）
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+      // 两态用同一套 class：没有任何 collapsed 分支，几何就不可能漂移
+      className="flex shrink-0 select-none items-center gap-1 pl-1 pr-[4.5rem]"
     >
       {/*
-        折叠 / 展开箭头：单独一个按钮，mousedown 阻止冒泡，
-        这样点它只切换折叠，不会误触标题栏的拖拽（旁边空白仍可拖动）。
+        折叠 / 展开箭头：唯一的折叠开关。
+        mousedown 阻止冒泡，点它只切换折叠，不会误触标题栏拖拽。
       */}
       <button
         type="button"
-        title={collapsed ? "展开便签" : "折叠成条"}
+        aria-label={collapsed ? "展开便签" : "折叠成条"}
         aria-expanded={!collapsed}
         onClick={onToggleCollapsed}
         onMouseDown={(e) => e.stopPropagation()}
-        className="note-icon-btn note-focus flex shrink-0 items-center justify-center rounded-full p-[5px] focus-visible:outline-none"
+        className="note-icon-btn note-focus flex shrink-0 items-center justify-center rounded-full p-2 focus-visible:outline-none"
       >
         <ChevronIcon
           className={`h-[0.875em] w-[0.875em] transition-transform duration-200 ${
@@ -97,94 +80,36 @@ export default function TopBar({
         />
       </button>
 
-      {editing ? (
-        /*
-          输入框不挂 data-tauri-drag-region，且 mousedown 阻止冒泡：
-          点标题能正常聚焦 / 选词，点它旁边的空白仍然拖窗口。
-        */
-        <input
-          ref={inputRef}
-          value={draft}
-          maxLength={MAX_TITLE_CHARS}
-          aria-label="便签标题"
-          spellCheck={false}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onMouseDown={(e) => e.stopPropagation()}
-          onContextMenu={onFieldContextMenu}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commit();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              cancel();
-            }
-          }}
-          style={{ width: `${Math.min(14, Math.max(3, draft.length + 1))}ch` }}
-          className="note-title-input text-[0.625em] font-semibold tracking-[0.14em] outline-none"
-        />
-      ) : (
-        <button
-          type="button"
-          title={title}
-          onClick={beginEdit}
-          onMouseDown={(e) => e.stopPropagation()}
-          className="note-title-btn note-focus truncate rounded-[3px] px-0.5 text-[0.625em] font-semibold uppercase tracking-[0.14em] focus-visible:outline-none"
-        >
-          {title}
-        </button>
-      )}
+      {/*
+        标题：**纯展示 + 拖动**，不响应右键，也不让右键冒泡到卡片。
+        标题栏整条都不弹菜单：折叠态只有 40px 高，菜单必然被窗口裁掉，
+        展开态弹出来也只有"新建便签"这种和标题无关的项，纯属噪音。
+        右键菜单统一由正文 / 卡片空白区提供（见 App 的 openCardMenu）。
+        也不加 title 属性：原生 tooltip 又慢又丑，还把标题重复显示一遍。
+      */}
+      <span
+        data-tauri-drag-region
+        onContextMenu={(e) => {
+          // preventDefault 挡住 WebView2 原生菜单，stopPropagation 挡住卡片的自定义菜单
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        className="note-title-label min-w-0 flex-1 truncate text-[0.625em] font-semibold uppercase tracking-[0.14em]"
+      >
+        {title}
+      </span>
 
-      {/* 剩余空白都可拖动：pointer-events-none 让事件落到父级拖动区 */}
-      <div data-tauri-drag-region className="pointer-events-none h-full flex-1" />
-
-      {/* 折叠成条时空间紧张，保存提示让位给标题（保存状态仍照常落盘） */}
+      {/* 折叠成条时空间紧张，保存提示让位（保存状态仍照常落盘） */}
       {!collapsed && (
         <span
-          className={`note-faint mr-0.5 text-[0.625em] transition-opacity duration-300 ${
+          data-tauri-drag-region
+          className={`note-faint shrink-0 text-[0.625em] transition-opacity duration-300 ${
             justSaved ? "opacity-100" : "opacity-0"
           }`}
         >
           已保存
         </span>
       )}
-
-      {/*
-        图钉只有两种视觉状态，不再画外圈 / 底色块：
-        - 未置顶：竖直、淡色，hover 变深；
-        - 置顶：整体旋转 45°（斜着的图钉），保持深色。
-        旋转加在 svg 自身上（transform-origin 居中），按钮 padding 留白足够、
-        且没有 overflow-hidden，所以旋转后不会被裁切，点击热区也不变。
-      */}
-      <button
-        type="button"
-        title={pinned ? "取消置顶" : "置顶"}
-        aria-pressed={pinned}
-        onClick={onTogglePin}
-        className="note-icon-btn note-focus group flex items-center justify-center rounded-full p-[7px] focus-visible:outline-none"
-      >
-        <PinIcon
-          className={`h-[0.9375em] w-[0.9375em] overflow-visible transition-[transform,color] duration-200 ease-out ${
-            pinned ? "rotate-45" : ""
-          }`}
-        />
-      </button>
-
-      <button
-        type="button"
-        title="设置"
-        aria-expanded={settingsOpen}
-        onClick={onToggleSettings}
-        className={`note-focus rounded-full p-[7px] focus-visible:outline-none ${
-          settingsOpen
-            ? "note-icon-btn-active transition-colors"
-            : "note-icon-btn"
-        }`}
-      >
-        <GearIcon className="h-[0.9375em] w-[0.9375em]" />
-      </button>
     </div>
   );
 }

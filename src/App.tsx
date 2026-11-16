@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "./api";
 import type { TodoItem } from "./types";
 import { normalizeStyle, styleVars, FONT_SIZES } from "./theme";
 import type { NoteStyle } from "./theme";
-import TopBar from "./components/TopBar";
+import TopBar, { BAR_HEIGHT } from "./components/TopBar";
 import TodoList from "./components/TodoList";
-import SettingsPanel from "./components/SettingsPanel";
 import ContextMenu from "./components/ContextMenu";
 import type { ContextMenuItem } from "./components/ContextMenu";
+import { GearIcon, PinIcon } from "./components/icons";
 
 function newId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -26,13 +27,13 @@ export default function App() {
   const [pinned, setPinned] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [style, setStyle] = useState<NoteStyle>(() => normalizeStyle(null));
+  /** 设置面板是独立窗口，这里只记它开没开（由后端事件同步，不自己猜） */
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  /** 自定义右键菜单：坐标 + 触发位置（输入框 / 卡片空白） */
+  /** 自定义右键菜单：坐标 + 触发位置（输入框 / 标题 / 卡片空白） */
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
-    target: "field" | "card";
+    target: "field" | "title" | "card";
   } | null>(null);
   /** 当前右键命中的输入元素，以及右键瞬间的选区（菜单点击会让输入框失焦） */
   const fieldRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
@@ -40,9 +41,15 @@ export default function App() {
   /** Ctrl+滚轮调字号的轻提示（卡片角落浮出 1 秒后淡出） */
   const [fontToast, setFontToast] = useState<{ id: number; label: string } | null>(null);
   const fontToastTimer = useRef<number | null>(null);
-  const [storePath, setStorePath] = useState("");
   const [savedTick, setSavedTick] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  /** 当前窗口所属便签的 id：跨窗口事件要靠它判断"是不是我自己的事" */
+  const noteIdRef = useRef<string>("");
+  /**
+   * 正在接收远端同步。为 true 时外观防抖 effect 直接跳过，
+   * 避免"远端更新 → 回写 → 再广播"的无限回环。
+   */
+  const syncingRef = useRef(false);
 
   // 1) 启动时只载入「当前窗口」对应的那张便签（label = note-<id>）
   useEffect(() => {
@@ -51,13 +58,13 @@ export default function App() {
       try {
         const snapshot = await api.noteState();
         if (!alive) return;
+        noteIdRef.current = snapshot.note.id;
         setTitle(snapshot.note.title || "便签");
         setText(snapshot.note.text);
         setTodos(snapshot.note.todos);
         setPinned(snapshot.note.pinned);
         setCollapsed(snapshot.note.collapsed === true);
         setStyle(normalizeStyle(snapshot.note));
-        setStorePath(snapshot.storePath);
         // 图钉图标以**窗口真实层级**为准：store 里的 pinned 只是期望值，
         // 启动时应用可能会被后续的层级操作覆盖（见 win_desktop_pin 顶部 BUG 2 说明）。
         // 只在这一刻回读一次，不做轮询。
@@ -99,11 +106,16 @@ export default function App() {
   }, [text, todos, ready]);
 
   // 3) 外观改动防抖落盘（拖动透明度滑块时实时预览，停手 300ms 后写盘）
+  //    注意：收到远端同步（syncingRef）时**不**回写，否则会和广播形成无限回环。
   const skipFirstStyleSave = useRef(true);
   useEffect(() => {
     if (!ready) return;
     if (skipFirstStyleSave.current) {
       skipFirstStyleSave.current = false;
+      return;
+    }
+    if (syncingRef.current) {
+      syncingRef.current = false;
       return;
     }
     const timer = window.setTimeout(() => {
@@ -163,18 +175,6 @@ export default function App() {
     };
   }, []);
 
-  // 5) Esc 关闭设置面板
-  useEffect(() => {
-    if (!settingsOpen) return;
-    // 右键菜单打开时，Esc 先关菜单（ContextMenu 在捕获阶段处理），这里让路
-    if (menu) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSettingsOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [settingsOpen, menu]);
-
   // 5) 同步 HTML 文档标题：WebView2 会把 document.title 反映到窗口标题，
   // 这样 Alt+Tab / 任务管理器里显示的就是便签自己的名字。
   useEffect(() => {
@@ -187,6 +187,48 @@ export default function App() {
     const t = window.setTimeout(() => setError(null), 5000);
     return () => window.clearTimeout(t);
   }, [error]);
+
+  // 7) 跨窗口状态同步（见 Rust 侧 events 模块）
+  //    - note-updated：另一端（设置面板）改了标题 / 外观 → 重新读一次
+  //    - settings-state：面板开 / 关 → 同步齿轮按钮高亮
+  //
+  // ⚠️ 这里**必须**用 `syncing` 标记把回写挡掉：
+  //    事件 → setStyle → 外观防抖 effect 以为用户改了外观 → saveStyle()
+  //    → 后端广播 note-updated → 又 setStyle ……  这是一条无限回环，
+  //    表现为"已保存"提示永远不消失（savedTick 被无限递增）。
+  //    收到远端更新时只更新本地显示，绝不回写。
+  useEffect(() => {
+    let alive = true;
+
+    const unlistenNote = listen<{ noteId: string }>("note-updated", (event) => {
+      if (!alive || event.payload.noteId !== noteIdRef.current) return;
+      void api
+        .noteState()
+        .then((snapshot) => {
+          if (!alive) return;
+          syncingRef.current = true;
+          setTitle(snapshot.note.title || "便签");
+          setStyle(normalizeStyle(snapshot.note));
+        })
+        .catch(() => {
+          /* 单次读取失败不打扰用户，下次事件再同步 */
+        });
+    });
+
+    const unlistenSettings = listen<{ noteId: string; open: boolean }>(
+      "settings-state",
+      (event) => {
+        if (!alive || event.payload.noteId !== noteIdRef.current) return;
+        setSettingsOpen(event.payload.open);
+      }
+    );
+
+    return () => {
+      alive = false;
+      void unlistenNote.then((fn) => fn());
+      void unlistenSettings.then((fn) => fn());
+    };
+  }, []);
 
   const addTodo = useCallback((raw: string) => {
     const value = raw.trim();
@@ -214,19 +256,7 @@ export default function App() {
     setTodos((prev) => prev.filter((item) => !item.done));
   }, []);
 
-  const updateStyle = useCallback((patch: Partial<NoteStyle>) => {
-    setStyle((prev) => normalizeStyle({ ...prev, ...patch }));
-  }, []);
-
   /** 标题是离散操作（回车 / 失焦才提交），直接走同一条 Rust 单锁写盘通道 */
-  const renameTitle = useCallback((next: string) => {
-    setTitle(next);
-    api
-      .saveTitle(next)
-      .then((actual) => setTitle(actual))
-      .catch((err) => setError(`保存标题失败：${String(err)}`));
-  }, []);
-
   const togglePin = useCallback(async () => {
     const next = !pinned;
     setPinned(next);
@@ -252,8 +282,6 @@ export default function App() {
   const toggleCollapsed = useCallback(async () => {
     const next = !collapsed;
     setCollapsed(next);
-    // 折叠后设置面板没有立足之地，顺手关掉
-    setSettingsOpen(false);
     try {
       await api.setCollapsed(next);
     } catch (err) {
@@ -262,17 +290,19 @@ export default function App() {
     }
   }, [collapsed]);
 
-  const hideToTray = useCallback(() => {
-    setSettingsOpen(false);
-    setConfirmDelete(false);
-    void api.hideNote();
-  }, []);
-
-  /** 删除当前便签：后端先落盘再销毁窗口；删到一张不剩时应用会自行退出 */
-  const deleteThisNote = useCallback(() => {
-    setSettingsOpen(false);
-    setConfirmDelete(false);
-    void api.deleteNote().catch((err) => setError(`删除便签失败：${String(err)}`));
+  /**
+   * 开关设置面板：面板是独立窗口，由后端创建 / 销毁。
+   *
+   * 关键点：**不拿本地 settingsOpen 做判断**。面板可能被用户点 X / Esc 关掉，
+   * 本地状态就是过期的；以本地状态为准会出现"点一次没反应、要点第二次才开"。
+   * 这里直接告诉后端"切换"，什么状态由后端说了算，结果通过事件回来更新按钮高亮。
+   */
+  const toggleSettings = useCallback(async () => {
+    try {
+      await api.toggleSettings();
+    } catch (err) {
+      setError(`切换设置面板失败：${String(err)}`);
+    }
   }, []);
 
   // ------------------------------------------------ 自定义右键菜单
@@ -368,12 +398,6 @@ export default function App() {
     void api.createNote().catch((err) => setError(`新建便签失败：${String(err)}`));
   }, []);
 
-  const requestDelete = useCallback(() => {
-    // 复用设置面板的二次确认：打开面板并直接进入"确认删除"态
-    setSettingsOpen(true);
-    setConfirmDelete(true);
-  }, []);
-
   // 打开菜单时算一次选中内容，用来决定剪切 / 复制是否可用
   const contextSelection = useMemo(() => {
     if (!menu || menu.target !== "field") return "";
@@ -382,19 +406,16 @@ export default function App() {
 
   const contextMenuItems: ContextMenuItem[] = useMemo(() => {
     if (!menu) return [];
+
+    // 右键菜单只放**别处没有入口**的操作：
+    // 折叠 / 设置 / 置顶 / 删除各自有专属按钮或设置面板，
+    // 这里再列一遍就是重复入口，只留新建便签。
     const common: ContextMenuItem[] = [
       { kind: "separator", id: "sep-actions" },
       { id: "new-note", label: "新建便签", onSelect: createNote },
-      {
-        id: "collapse",
-        label: collapsed ? "展开便签" : "折叠成条",
-        onSelect: () => void toggleCollapsed(),
-      },
-      { id: "settings", label: "设置…", onSelect: () => setSettingsOpen(true) },
-      { kind: "separator", id: "sep-delete" },
-      { id: "delete", label: "删除便签", danger: true, onSelect: requestDelete },
     ];
 
+    // 标题右键直接进改名，不弹菜单，所以这里不会有 title 分支
     if (menu.target === "card") return common;
 
     return [
@@ -424,10 +445,7 @@ export default function App() {
   }, [
     menu,
     contextSelection,
-    collapsed,
     createNote,
-    toggleCollapsed,
-    requestDelete,
     cutSelection,
     copySelection,
     pasteAtSelection,
@@ -440,31 +458,73 @@ export default function App() {
 
   return (
     <div
-      className="note-root h-full w-full"
+      className="note-root relative h-full w-full"
       style={vars}
       // 兜底：别让 WebView2 的原生右键菜单冒出来（卡片 / 输入框各自有自己的处理）
       onContextMenu={(e) => e.preventDefault()}
     >
+      {/*
+        图钉 / 设置按钮故意放在卡片**外面**：它们绝对定位、不参与卡片内的 flex，
+        便签被拖窄时也不会被挤出去、更不会被卡片的 overflow-hidden 裁掉，
+        视觉上就是浮在便签右上角。
+
+        高度用固定的 BAR_HEIGHT，不用 `inset-y-0` 也不用写死 36px：
+        这组按钮和标题栏必须是同一个高度、同一个垂直中心，否则折叠切换时会跳。
+      */}
+      <div
+        style={{ height: BAR_HEIGHT }}
+        className="pointer-events-none absolute right-1 top-0 z-20 flex items-center gap-0.5"
+      >
+        {/*
+          图钉只有两种视觉状态，不再画外圈 / 底色块：
+          - 未置顶：竖直、淡色，hover 变深；
+          - 置顶：整体旋转 45°（斜着的图钉），保持深色。
+          旋转加在 svg 自身上（transform-origin 居中），按钮 padding 留白足够、
+          且没有 overflow-hidden，所以旋转后不会被裁切，点击热区也不变。
+        */}
+        <button
+          type="button"
+          aria-label={pinned ? "取消置顶" : "置顶"}
+          aria-pressed={pinned}
+          onClick={togglePin}
+          onMouseDown={(e) => e.stopPropagation()}
+          className="note-icon-btn note-focus pointer-events-auto group flex items-center justify-center rounded-full p-[7px] focus-visible:outline-none"
+        >
+          <PinIcon
+            className={`h-[0.9375em] w-[0.9375em] overflow-visible transition-[transform,color] duration-200 ease-out ${
+              pinned ? "rotate-45" : ""
+            }`}
+          />
+        </button>
+
+        <button
+          type="button"
+          aria-label="设置"
+          aria-expanded={settingsOpen}
+          onClick={toggleSettings}
+          onMouseDown={(e) => e.stopPropagation()}
+          className={`note-focus pointer-events-auto rounded-full p-[7px] focus-visible:outline-none ${
+            settingsOpen ? "note-icon-btn-active transition-colors" : "note-icon-btn"
+          }`}
+        >
+          <GearIcon className="h-[0.9375em] w-[0.9375em]" />
+        </button>
+      </div>
+
       <div
         className={`note-card relative flex h-full w-full flex-col overflow-hidden rounded-[18px] border ${
           lowOpacity ? "note-card-edge" : ""
         }`}
-        onContextMenu={openCardMenu}
+        onContextMenu={collapsed ? undefined : openCardMenu}
       >
         <TopBar
           title={title}
-          pinned={pinned}
           collapsed={collapsed}
           savedTick={savedTick}
-          settingsOpen={settingsOpen}
-          onTitleChange={renameTitle}
-          onTogglePin={togglePin}
           onToggleCollapsed={toggleCollapsed}
-          onToggleSettings={() => setSettingsOpen((v) => !v)}
-          onFieldContextMenu={openFieldMenu}
         />
 
-        {/* 折叠成条时只留标题栏：正文 / 待办都不渲染（窗口高度只有 48 逻辑像素） */}
+        {/* 折叠成条时只留标题栏：正文 / 待办都不渲染（窗口高度只有 40 逻辑像素） */}
         {!collapsed && (
           <>
             <textarea
@@ -505,24 +565,6 @@ export default function App() {
           </div>
         )}
       </div>
-
-      {settingsOpen && (
-        <SettingsPanel
-          pinned={pinned}
-          storePath={storePath}
-          style={style}
-          onStyleChange={updateStyle}
-          onTogglePin={togglePin}
-          onHide={hideToTray}
-          onDelete={deleteThisNote}
-          confirmDelete={confirmDelete}
-          onConfirmDeleteChange={setConfirmDelete}
-          onClose={() => {
-            setSettingsOpen(false);
-            setConfirmDelete(false);
-          }}
-        />
-      )}
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={contextMenuItems} onClose={closeMenu} />

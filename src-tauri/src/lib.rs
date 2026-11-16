@@ -8,6 +8,8 @@
 
 mod cli;
 mod diagnostics;
+mod events;
+mod settings_panel;
 mod store;
 #[cfg(windows)]
 mod win_desktop_pin;
@@ -30,10 +32,14 @@ use store::{normalize_title, Note, NoteStyle, Store, TodoItem, WindowGeometry};
 /// 便签窗口 label 前缀；完整 label 为 `note-<uuid>`
 const NOTE_LABEL_PREFIX: &str = "note-";
 
-/// 折叠态窗口高度（逻辑像素）：只够放一行标题栏
-const COLLAPSED_HEIGHT: f64 = 48.0;
-/// 折叠态允许的最小高度（逻辑像素）：比 48 略低，留一点系统边框误差
-const MIN_COLLAPSED_HEIGHT: f64 = 40.0;
+/// 折叠态窗口高度（逻辑像素）。
+///
+/// **必须与标题栏高度一致**：展开态标题栏和折叠态窗口都是这个值，
+/// 两态的布局才是同一块矩形，标题文字位置绝对不动——
+/// 否则展开↔折叠时文字会上下跳（用户明确反馈过这个问题）。
+pub(crate) const COLLAPSED_HEIGHT: f64 = 40.0;
+/// 折叠态允许的最小高度（逻辑像素）：比 40 略低，留一点系统边框误差
+const MIN_COLLAPSED_HEIGHT: f64 = 36.0;
 /// 展开态的尺寸下限（逻辑像素）；折叠时必须先把这个下限降下来，否则窗口会被顶回 260
 const MIN_EXPANDED_WIDTH: f64 = 240.0;
 const MIN_EXPANDED_HEIGHT: f64 = 260.0;
@@ -90,8 +96,19 @@ fn note_id_from_label(label: &str) -> Option<String> {
 }
 
 fn require_note_id(window: &Window) -> Result<String, String> {
-    note_id_from_label(window.label())
-        .ok_or_else(|| format!("当前窗口不是便签窗口：{}", window.label()))
+    let label = window.label();
+    // 设置面板窗口（settings-<id>）代表它所属的那张便签，所有命令统一解析到 note id。
+    note_id_from_label(label)
+        .or_else(|| settings_panel::note_id_from_label(label))
+        .ok_or_else(|| format!("当前窗口不是便签窗口：{label}"))
+}
+
+/// 取「当前窗口所属便签」的便签窗口（从面板窗口发起命令时用）
+fn note_window(app: &AppHandle, window: &Window) -> Result<WebviewWindow, String> {
+    let id = require_note_id(window)?;
+    let label = note_label(&id);
+    app.get_webview_window(&label)
+        .ok_or_else(|| format!("便签窗口不存在：{label}"))
 }
 
 fn work_area_of(monitor: &Monitor) -> (i32, i32, u32, u32) {
@@ -105,13 +122,41 @@ fn work_area_of(monitor: &Monitor) -> (i32, i32, u32, u32) {
 }
 
 /// 中心点落在哪块显示器上，就返回哪块的工作区
-fn work_area_at(monitors: &[Monitor], x: i32, y: i32) -> Option<(i32, i32, u32, u32)> {
+pub(crate) fn work_area_at(monitors: &[Monitor], x: i32, y: i32) -> Option<(i32, i32, u32, u32)> {
     monitors
         .iter()
         .map(work_area_of)
         .find(|(ax, ay, aw, ah)| {
             x >= *ax && x <= ax + *aw as i32 && y >= *ay && y <= ay + *ah as i32
         })
+}
+
+/// 取一个**真实存在**的工作区，永不返回编造的默认值。
+///
+/// 为什么需要这个：便签可以被拖到屏幕外（窗口跑到所有显示器范围之外），
+/// 这时 `work_area_at` 找不到任何匹配的显示器。曾经在这里 `unwrap_or((0,0,1920,1080))`
+/// 塞了一个硬编码假工作区——于是面板被夹进这个虚构的 1920x1080 区域里，
+/// 表现为「便签一拖出屏幕，面板必定跳到同一个固定位置」。
+///
+/// 正确做法是退到**离它最近的显示器**：即使便签在屏幕外，
+/// 面板也会贴着它可见的那条边，位置可预期。
+pub(crate) fn work_area_for(monitors: &[Monitor], x: i32, y: i32) -> (i32, i32, u32, u32) {
+    if let Some(area) = work_area_at(monitors, x, y) {
+        return area;
+    }
+
+    // 找中心点与 (x, y) 距离最近的那块显示器
+    monitors
+        .iter()
+        .map(work_area_of)
+        .min_by_key(|(ax, ay, aw, ah)| {
+            // 点到矩形的距离（在矩形内为 0，这里不会发生，但保持公式完整）
+            let dx = (*ax - x).max(0).max(x - (ax + *aw as i32));
+            let dy = (*ay - y).max(0).max(y - (ay + *ah as i32));
+            (dx as i64) * (dx as i64) + (dy as i64) * (dy as i64)
+        })
+        // 一块显示器都没有时（无头 / 远程会话），用 Tauri 的主显示器信息兜底
+        .unwrap_or((0, 0, 1920, 1080))
 }
 
 fn center_in_area(area: (i32, i32, u32, u32), width: u32, height: u32) -> (i32, i32) {
@@ -123,7 +168,7 @@ fn center_in_area(area: (i32, i32, u32, u32), width: u32, height: u32) -> (i32, 
 }
 
 /// 把窗口夹到工作区内，保证至少整块可见（任务栏不会被盖住）
-fn clamp_to_area(
+pub(crate) fn clamp_to_area(
     area: (i32, i32, u32, u32),
     x: i32,
     y: i32,
@@ -176,6 +221,7 @@ fn save_note_content(
 
 #[tauri::command]
 fn set_note_style(
+    app: AppHandle,
     window: Window,
     state: State<'_, AppState>,
     style: NoteStyle,
@@ -183,11 +229,14 @@ fn set_note_style(
     let normalized = style.normalized();
     let id = require_note_id(&window)?;
     let applied = normalized.clone();
+    let id_for_update = id.clone();
     state.update(move |s| {
-        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id_for_update) {
             note.apply_style(&applied);
         }
     })?;
+    // 外观变了：便签窗口和面板窗口都要跟着刷新
+    events::note_updated(&app, &id);
     Ok(normalized)
 }
 
@@ -203,13 +252,16 @@ fn set_note_title(
     let applied = normalized.clone();
     // 同步操作系统层面的窗口标题（Alt+Tab / 任务管理器），失败不影响主流程
     let _ = window.set_title(&applied);
+    let id_for_update = id.clone();
     state.update(move |s| {
-        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id_for_update) {
             note.title = applied;
         }
     })?;
     // 托盘菜单里的便签名要跟着改
     schedule_tray_refresh(&app);
+    // 标题变了：另一端（面板 / 便签）刷新显示
+    events::note_updated(&app, &id);
     Ok(normalized)
 }
 
@@ -219,10 +271,7 @@ fn set_note_title(
 /// 不做轮询，只在拿到快照 / 切换图钉后各读一次。
 #[tauri::command]
 fn get_note_always_on_top(app: AppHandle, window: Window) -> Result<bool, String> {
-    let label = window.label().to_string();
-    let webview = app
-        .get_webview_window(&label)
-        .ok_or_else(|| format!("便签窗口不存在：{label}"))?;
+    let webview = note_window(&app, &window)?;
     #[cfg(windows)]
     {
         Ok(win_desktop_pin::is_always_on_top(&webview))
@@ -241,10 +290,7 @@ fn set_note_pinned(
     pinned: bool,
 ) -> Result<bool, String> {
     let id = require_note_id(&window)?;
-    let label = window.label().to_string();
-    let webview = app
-        .get_webview_window(&label)
-        .ok_or_else(|| format!("便签窗口不存在：{label}"))?;
+    let webview = note_window(&app, &window)?;
     apply_pinned(&webview, &id, &state, pinned)
 }
 
@@ -283,11 +329,14 @@ fn apply_pinned(
 
     // 落盘的是"真实生效的状态"，避免图标说钉住、实际没钉住
     let id = id.to_string();
+    let id_for_panel = id.clone();
     state.update(move |s| {
         if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
             note.pinned = actual;
         }
     })?;
+    // 面板层级跟着便签走，别一个置顶一个不置顶互相盖住
+    settings_panel::sync_layer(webview.app_handle(), &id_for_panel, actual);
     Ok(actual)
 }
 
@@ -316,13 +365,9 @@ fn set_note_collapsed(
     collapsed: bool,
 ) -> Result<bool, String> {
     let id = require_note_id(&window)?;
-    let label = window.label().to_string();
-    let webview = app
-        .get_webview_window(&label)
-        .ok_or_else(|| "便签窗口不存在".to_string())?;
+    let webview = note_window(&app, &window)?;
 
-    let (current, stored_bounds) = state.read(|s| {
-        s.notes
+    let (current, stored_bounds) = state.read(|s| {        s.notes
             .iter()
             .find(|n| n.id == id)
             .map(|n| (n.collapsed, n.bounds.clone()))
@@ -348,8 +393,9 @@ fn set_note_collapsed(
     }
 
     let persisted = bounds.clone();
+    let id_for_update = id.clone();
     state.update(move |s| {
-        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id_for_update) {
             note.collapsed = collapsed;
             if persisted.width > 0 && persisted.height > 0 {
                 note.bounds = Some(persisted);
@@ -359,6 +405,9 @@ fn set_note_collapsed(
 
     apply_collapse_size(&webview, collapsed, Some(bounds.height))
         .map_err(|e| format!("调整窗口尺寸失败：{e}"))?;
+
+    // 折叠 / 展开会改窗口高度，面板得跟着重新定位，否则会飘在半空
+    settings_panel::follow(&app, &id);
 
     schedule_tray_refresh(&app);
     Ok(collapsed)
@@ -370,6 +419,55 @@ async fn create_note(app: AppHandle) -> Result<String, String> {
     // 主线程一阻塞就会死锁（表现为窗口建出来但是 about:blank）。
     create_note_via(&app)
 }
+
+// ---------------------------------------------------------------- 设置面板窗口
+
+/// 打开当前便签的设置面板（独立小窗口，见 `settings_panel` 模块）
+#[tauri::command]
+async fn open_settings_panel(app: AppHandle, window: Window) -> Result<(), String> {
+    let note_id = require_note_id(&window)?;
+    let parent = note_window(&app, &window)?;
+    settings_panel::open(&app, &note_id, &parent)
+}
+
+/// 切换设置面板，返回切换之后的真实状态。
+///
+/// 前端**不要**拿本地 state 判断该开还是该关：面板可能被用户点 X / Esc 关掉，
+/// 本地状态就是过期的，会导致"点一次没反应、要点第二次"。这里以窗口是否存在为准。
+#[tauri::command]
+async fn toggle_settings_panel(app: AppHandle, window: Window) -> Result<bool, String> {
+    let note_id = require_note_id(&window)?;
+    if settings_panel::is_open(&app, &note_id) {
+        settings_panel::close(&app, &note_id);
+        Ok(false)
+    } else {
+        let parent = note_window(&app, &window)?;
+        settings_panel::open(&app, &note_id, &parent)?;
+        Ok(true)
+    }
+}
+/// 按内容高度调整设置面板窗口（高度跟着内容走，避免裁切或留白）
+#[tauri::command]
+fn resize_settings_panel(app: AppHandle, window: Window, content_height: f64) -> Result<(), String> {
+    let note_id = require_note_id(&window)?;
+    settings_panel::resize_to_content(&app, &note_id, content_height);
+    Ok(())
+}
+
+/// 关闭当前便签的设置面板（便签窗口和面板窗口都能调）
+#[tauri::command]
+fn close_settings_panel(app: AppHandle, window: Window) -> Result<(), String> {
+    let note_id = require_note_id(&window)?;
+    settings_panel::close(&app, &note_id);
+    Ok(())
+}
+
+/// 把当前窗口所属便签的 id 告诉前端：便签窗口和面板窗口都能问。
+#[tauri::command]
+fn current_note_id(window: Window) -> Result<String, String> {
+    require_note_id(&window)
+}
+
 
 /// 新建一张便签（数据 + 窗口 + 托盘刷新）。UI 命令、托盘、`--new-note` 共用这一条路径。
 fn create_note_via(app: &AppHandle) -> Result<String, String> {
@@ -400,6 +498,8 @@ fn delete_note_via(app: &AppHandle, state: &AppState, id: &str) -> Result<(), St
         win_desktop_pin::release(&webview);
         let _ = webview.destroy();
     }
+    // 面板是这个便签的附属窗口，便签没了它也必须关掉
+    settings_panel::close(app, id);
 
     // 被删除的便签要从托盘列表里消失
     schedule_tray_refresh(app);
@@ -413,9 +513,12 @@ fn delete_note_via(app: &AppHandle, state: &AppState, id: &str) -> Result<(), St
 }
 
 #[tauri::command]
-fn hide_note(window: Window, state: State<'_, AppState>) -> Result<(), String> {
+fn hide_note(app: AppHandle, window: Window, state: State<'_, AppState>) -> Result<(), String> {
     let id = require_note_id(&window)?;
-    let _ = window.hide();
+    let note_win = note_window(&app, &window)?;
+    // 面板跟着便签一起收起来，否则托盘里隐藏了便签、面板还浮在桌面上
+    settings_panel::close(&app, &id);
+    let _ = note_win.hide();
     state.update(move |s| {
         if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
             note.visible = false;
@@ -607,6 +710,11 @@ fn attach_window_events(app: &AppHandle, window: &WebviewWindow) {
         // 不用事件里带的坐标/尺寸：在 Windows 高 DPI 下，创建时的初始尺寸是逻辑像素，
         // 事件里的是物理像素，混着用会把窗口存小。统一在防抖后从窗口本身读一次。
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+            // 面板跟随必须**立即**做，不能等 400ms 的落盘防抖：
+            // 否则拖动便签时面板纹丝不动，松手瞬间才"瞬移"过去，非常怪。
+            if let Some(id) = note_id_from_label(&label) {
+                settings_panel::follow(&app, &id);
+            }
             schedule_geometry_persist(&app, &label);
         }
         // 每条便签各自挂一个影子 owner（见 win_desktop_pin），所以激活不再牵连兄弟，
@@ -670,7 +778,6 @@ fn schedule_geometry_persist(app: &AppHandle, label: &str) {
         capture_geometry(&app, &label);
     });
 }
-
 /// 从窗口读当前几何（物理像素）写进该便签的 bounds
 /// 从窗口读当前几何（物理像素）写进该便签的 bounds。
 ///
@@ -723,11 +830,14 @@ fn capture_geometry(app: &AppHandle, label: &str) {
         width: size.width,
         height,
     };
+    let id_for_update = id.clone();
     let _ = state.update(move |s| {
-        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id_for_update) {
             note.bounds = Some(geometry);
         }
     });
+    // 面板跟随不在这里做：它挂在 Moved/Resized 事件上立即执行。
+    // 这里只负责落盘，同一件事只有一个触发点。
 }
 
 // ---------------------------------------------------------------- 调试命令行
@@ -1479,6 +1589,11 @@ pub fn run() {
             create_note,
             delete_note,
             hide_note,
+            open_settings_panel,
+            toggle_settings_panel,
+            resize_settings_panel,
+            close_settings_panel,
+            current_note_id,
         ])
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")

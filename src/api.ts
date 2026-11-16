@@ -22,6 +22,15 @@ export const api = {
   /** 折叠 / 展开当前便签：只改窗口实际尺寸，bounds 里始终是展开态几何 */
   setCollapsed: (collapsed: boolean) =>
     invoke<boolean>("set_note_collapsed", { collapsed }),
+  /** 切换设置面板（后端按真实窗口是否存在决定开/关，前端不猜状态） */
+  toggleSettings: () => invoke<boolean>("toggle_settings_panel"),
+  /** 关闭设置面板 */
+  closeSettings: () => invoke<void>("close_settings_panel"),
+  /** 按内容高度调整面板窗口（高度跟着内容走，避免裁切或留白） */
+  resizeSettings: (contentHeight: number) =>
+    invoke<void>("resize_settings_panel", { contentHeight }),
+  /** 当前窗口所属便签的 id（便签窗口 / 面板窗口都能问） */
+  currentNoteId: () => invoke<string>("current_note_id"),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   createNote: () => invoke<string>("create_note"),
   deleteNote: () => invoke<void>("delete_note"),

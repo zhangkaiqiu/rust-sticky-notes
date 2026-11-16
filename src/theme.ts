@@ -54,9 +54,7 @@ type Palette = {
   icon: string;
   accent: string;
   onAccent: string;
-  panel: string;
   danger: string;
-  switchOff: string;
 };
 
 export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
@@ -69,9 +67,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "120 53 15",
       accent: "245 158 11",
       onAccent: "255 255 255",
-      panel: "255 253 243",
       danger: "220 38 38",
-      switchOff: "214 211 209",
     },
     dark: {
       surface: "42 38 34",
@@ -81,9 +77,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "216 194 156",
       accent: "224 166 60",
       onAccent: "26 21 14",
-      panel: "51 46 40",
       danger: "248 113 113",
-      switchOff: "87 83 78",
     },
   },
   mint: {
@@ -95,9 +89,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "16 101 74",
       accent: "52 168 124",
       onAccent: "255 255 255",
-      panel: "242 250 244",
       danger: "220 38 38",
-      switchOff: "209 213 219",
     },
     dark: {
       surface: "34 48 41",
@@ -107,9 +99,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "154 211 185",
       accent: "77 190 146",
       onAccent: "16 28 22",
-      panel: "42 58 50",
       danger: "248 113 113",
-      switchOff: "75 85 99",
     },
   },
   rose: {
@@ -121,9 +111,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "159 18 57",
       accent: "228 99 138",
       onAccent: "255 255 255",
-      panel: "253 242 244",
       danger: "220 38 38",
-      switchOff: "214 211 209",
     },
     dark: {
       surface: "51 35 42",
@@ -133,9 +121,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "226 165 183",
       accent: "233 122 158",
       onAccent: "32 18 23",
-      panel: "59 42 50",
       danger: "248 113 113",
-      switchOff: "87 83 78",
     },
   },
   sky: {
@@ -147,9 +133,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "29 78 137",
       accent: "59 130 196",
       onAccent: "255 255 255",
-      panel: "243 248 254",
       danger: "220 38 38",
-      switchOff: "214 211 209",
     },
     dark: {
       surface: "32 43 56",
@@ -159,9 +143,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "158 196 232",
       accent: "90 169 230",
       onAccent: "16 26 36",
-      panel: "39 50 63",
       danger: "248 113 113",
-      switchOff: "75 85 99",
     },
   },
   sand: {
@@ -173,9 +155,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "138 106 36",
       accent: "201 154 46",
       onAccent: "255 255 255",
-      panel: "251 244 227",
       danger: "220 38 38",
-      switchOff: "214 211 209",
     },
     dark: {
       surface: "50 44 34",
@@ -185,9 +165,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "217 191 140",
       accent: "216 172 76",
       onAccent: "28 23 15",
-      panel: "58 51 40",
       danger: "248 113 113",
-      switchOff: "87 83 78",
     },
   },
   graphite: {
@@ -199,9 +177,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "63 63 70",
       accent: "113 113 122",
       onAccent: "255 255 255",
-      panel: "246 246 247",
       danger: "220 38 38",
-      switchOff: "212 212 216",
     },
     dark: {
       surface: "38 38 42",
@@ -211,9 +187,7 @@ export const PALETTES: Record<NoteColor, Record<NoteTheme, Palette>> = {
       icon: "198 198 206",
       accent: "156 163 175",
       onAccent: "24 24 27",
-      panel: "46 46 51",
       danger: "248 113 113",
-      switchOff: "82 82 91",
     },
   },
 };
@@ -250,9 +224,7 @@ export function styleVars(style: NoteStyle): CSSProperties {
     "--note-icon": palette.icon,
     "--note-accent": palette.accent,
     "--note-on-accent": palette.onAccent,
-    "--note-panel": palette.panel,
     "--note-danger": palette.danger,
-    "--note-switch-off": palette.switchOff,
     "--note-alpha": clampOpacity(style.opacity).toFixed(2),
     "--note-font-size": `${fontPx(style.fontSize)}px`,
     colorScheme: style.theme,
