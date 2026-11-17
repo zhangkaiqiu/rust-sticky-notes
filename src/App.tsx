@@ -6,8 +6,10 @@ import { api } from "./api";
 import type { TodoItem } from "./types";
 import { normalizeStyle, styleVars, FONT_SIZES } from "./theme";
 import type { NoteStyle } from "./theme";
+import { textBasis, todoBasis } from "./split";
 import TopBar, { BAR_HEIGHT } from "./components/TopBar";
 import TodoList from "./components/TodoList";
+import Splitter from "./components/Splitter";
 import ContextMenu from "./components/ContextMenu";
 import type { ContextMenuItem } from "./components/ContextMenu";
 import { GearIcon, PinIcon } from "./components/icons";
@@ -26,6 +28,13 @@ export default function App() {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [pinned, setPinned] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  /**
+   * 正文区 / 待办区的分割比例（待办区占比）。`0` = 用户没调过，按内容自适应。
+   * 拖动过程中只改这个 state，松手才落盘（见 Splitter 的 onCommit）。
+   */
+  const [splitRatio, setSplitRatio] = useState(0);
+  /** 分割线的比例基准：正文 + 待办这一整块（不含标题栏 / 错误提示） */
+  const bodyRef = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<NoteStyle>(() => normalizeStyle(null));
   /** 设置面板是独立窗口，这里只记它开没开（由后端事件同步，不自己猜） */
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -64,6 +73,7 @@ export default function App() {
         setTodos(snapshot.note.todos);
         setPinned(snapshot.note.pinned);
         setCollapsed(snapshot.note.collapsed === true);
+        setSplitRatio(snapshot.note.splitRatio || 0);
         setStyle(normalizeStyle(snapshot.note));
         // 图钉图标以**窗口真实层级**为准：store 里的 pinned 只是期望值，
         // 启动时应用可能会被后续的层级操作覆盖（见 win_desktop_pin 顶部 BUG 2 说明）。
@@ -254,6 +264,28 @@ export default function App() {
 
   const clearDone = useCallback(() => {
     setTodos((prev) => prev.filter((item) => !item.done));
+  }, []);
+
+  // ------------------------------------------------ 正文 / 待办分割
+
+  /**
+   * 拖动中：只改本地 state（每帧一次 setState 是廉价的），不落盘。
+   * `0` 仍然是"自适应"哨兵，这里原样传下去。
+   */
+  const previewSplit = useCallback((ratio: number) => setSplitRatio(ratio), []);
+
+  /**
+   * 松手 / 键盘调整结束：落一次盘。
+   *
+   * 用后端的返回值回写 state（而不是用本地值）：归一化区间在 Rust 侧也有兜底，
+   * 以后端为准就不会出现"界面 87%、JSON 里 82%"这种事。
+   * 失败只提示，不把拖动结果弹回去——用户已经看到了效果，闪一下更难受。
+   */
+  const commitSplit = useCallback((ratio: number) => {
+    void api
+      .saveSplitRatio(ratio)
+      .then((actual) => setSplitRatio(actual))
+      .catch((err) => setError(`保存分区比例失败：${String(err)}`));
   }, []);
 
   /** 标题是离散操作（回车 / 失焦才提交），直接走同一条 Rust 单锁写盘通道 */
@@ -527,25 +559,49 @@ export default function App() {
         {/* 折叠成条时只留标题栏：正文 / 待办都不渲染（窗口高度只有 40 逻辑像素） */}
         {!collapsed && (
           <>
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onContextMenu={openFieldMenu}
-              spellCheck={false}
-              placeholder="写点什么…"
-              className="note-placeholder note-text note-scroll min-h-[72px] flex-1 resize-none bg-transparent px-4 pb-1 pt-0.5 text-[0.84375em] leading-relaxed outline-none"
-            />
+            {/*
+              正文 + 待办 + 分割线是**一整块**（bodyRef）：分割比例以它的高度为基准，
+              所以窗口拉高拉低时两个区域一起缩放，不需要任何窗口尺寸监听。
 
-            <div className="note-divider mx-3 h-px shrink-0" />
+              两种布局（互斥，不叠加）：
+              - splitRatio = 0：自适应。正文 flex-1、待办按内容撑开最多 44%（改造前的样子）；
+              - splitRatio > 0：手动。两边都是固定 flex-basis，百分比里已经扣掉分割线高度，
+                所以两者加起来正好铺满，不会因为多出 9px 把某一区挤变形。
+            */}
+            <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col">
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onContextMenu={openFieldMenu}
+                spellCheck={false}
+                placeholder="写点什么…"
+                style={
+                  splitRatio > 0 ? { flexBasis: textBasis(splitRatio) } : undefined
+                }
+                className={`note-placeholder note-text note-scroll min-h-[72px] resize-none bg-transparent px-4 pb-1 pt-0.5 text-[0.84375em] leading-relaxed outline-none ${
+                  // 手动分区：basis 就是用户拖出来的高度，不许被 flex 再压一次；
+                  // 自适应：正文吃掉待办之外的全部空间
+                  splitRatio > 0 ? "shrink-0" : "flex-1"
+                }`}
+              />
 
-            <TodoList
-              todos={todos}
-              onAdd={addTodo}
-              onToggle={toggleTodo}
-              onEdit={editTodo}
-              onRemove={removeTodo}
-              onClearDone={clearDone}
-            />
+              <Splitter
+                ratio={splitRatio}
+                bodyRef={bodyRef}
+                onChange={previewSplit}
+                onCommit={commitSplit}
+              />
+
+              <TodoList
+                todos={todos}
+                onAdd={addTodo}
+                onToggle={toggleTodo}
+                onEdit={editTodo}
+                onRemove={removeTodo}
+                onClearDone={clearDone}
+                splitBasis={splitRatio > 0 ? todoBasis(splitRatio) : null}
+              />
+            </div>
 
             {error && (
               <div className="note-danger px-4 pb-2 text-[0.6875em] leading-snug">

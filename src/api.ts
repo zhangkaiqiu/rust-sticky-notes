@@ -13,6 +13,9 @@ export const api = {
   noteState: () => invoke<NoteState>("get_note_state"),
   saveContent: (text: string, todos: TodoItem[]) =>
     invoke<void>("save_note_content", { text, todos }),
+  /** 保存正文 / 待办的分割比例；0 = 恢复按内容自适应。返回后端归一化后的实际值 */
+  saveSplitRatio: (ratio: number) =>
+    invoke<number>("set_note_split_ratio", { ratio }),
   saveTitle: (title: string) => invoke<string>("set_note_title", { title }),
   saveStyle: (style: NoteStyle) => invoke<NoteStyle>("set_note_style", { style }),
   setPinned: (pinned: boolean) =>

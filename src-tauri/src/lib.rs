@@ -219,6 +219,30 @@ fn save_note_content(
     })
 }
 
+/// 保存「正文区 / 待办区」的分割比例（0 = 回到自适应）。
+///
+/// 只在这里落盘：拖动过程中前端只改本地显示，松手才调一次，
+/// 避免每帧一次 IPC + 一次写文件。`normalize` 里会做区间兜底。
+#[tauri::command]
+fn set_note_split_ratio(
+    window: Window,
+    state: State<'_, AppState>,
+    ratio: f64,
+) -> Result<f64, String> {
+    let id = require_note_id(&window)?;
+    let applied = if ratio.is_finite() && ratio > 0.0 {
+        ratio.clamp(store::MIN_SPLIT_RATIO, store::MAX_SPLIT_RATIO)
+    } else {
+        0.0
+    };
+    state.update(move |s| {
+        if let Some(note) = s.notes.iter_mut().find(|n| n.id == id) {
+            note.split_ratio = applied;
+        }
+    })?;
+    Ok(applied)
+}
+
 #[tauri::command]
 fn set_note_style(
     app: AppHandle,
@@ -1581,6 +1605,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_note_state,
             save_note_content,
+            set_note_split_ratio,
             set_note_title,
             set_note_style,
             set_note_pinned,

@@ -25,6 +25,7 @@
       "opacity": 0.97,
       "pinned": false,
       "collapsed": false,
+      "splitRatio": 0.42,
       "visible": true,
       "bounds": { "x": 0, "y": 0, "width": 640, "height": 840 }
     }
@@ -39,6 +40,10 @@
 - `bounds` 是**物理像素**；`visible: false` 的便签启动时不建窗口，托盘「显示全部」会重建
 - `collapsed: true` 只说明"窗口现在收成条"：`bounds` 里存的仍是**展开态**宽高，启动时按 `collapsed`
   把窗口压到 48 逻辑像素，展开时再按 `bounds.height` 恢复
+- `splitRatio` 是正文区 / 待办区的分割比例（待办区占比），取值被夹在 `0.02–0.98`；
+  **`0` 是哨兵值，表示用户没拖过分割线**，前端走"按内容自适应"的默认布局。
+  存比例而不是像素：窗口拉大拉小时两个区域一起缩放。细节见
+  [ui-conventions.md](ui-conventions.md) 第 8 条
 
 **从 v1（单便签）迁移**：
 

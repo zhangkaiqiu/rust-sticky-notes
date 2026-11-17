@@ -345,3 +345,36 @@ let area = work_area_at(monitors, x, y).unwrap_or((0, 0, 1920, 1080));
   - 面板关闭后齿轮高亮同步消失；连续开关面板点一次即开
   - 展开态 / 折叠态右键标题：均**不弹菜单**
   - 鼠标悬停标题、图钉按钮各 3 秒：无原生 tooltip
+
+## 0.5.1 正文 / 待办分割线（2026-11-17）
+
+用户要求：「自由输入区和待办区域中间有一条横线，希望鼠标可以通过这条横线上下拖动来自由调节两个区域的大小」。
+
+- 那条横线升级成 `role="separator"` 的分割线：热区 9px（视觉仍是 1px 线，
+  hover / 拖动时染强调色），按住上下拖动实时改变两块高度，双击复位成自适应
+- 拖的是**比例**不是像素：`store.json` 新增 `splitRatio`（待办区占比）。
+  存像素的话窗口一拉高待办区就顶满整张便签。`0` 是哨兵 = 用户没调过，
+  此时走改造前的自适应布局（正文 `flex-1` + 待办按内容撑开最多 44%）
+- 上下限按像素算而不是写死比例（正文 ≥72px / 待办 ≥88px）：同一个 30% 在 260px 高的
+  便签里是 78px、在 840px 里是 252px，只有像素下限才跟"能不能用"对得上
+- 落盘时机：拖动过程只改本地 state，松手（或方向键）才调一次
+  `set_note_split_ratio`，不做每帧 IPC + 写文件
+- `↑`/`↓` 也能调（Shift ×3）：键盘可达，不是只服务鼠标
+- 规则固化在 [ui-conventions.md](ui-conventions.md) 第 8 条
+
+### 验证（release exe + WebView2 CDP 量真实几何，200% DPI）
+
+`npm run build`（tsc --noEmit + vite build）通过、`cargo check` 无 warning、
+`cargo build --release` 通过。以下几何值都是 CDP 直接读 DOM 的 `getBoundingClientRect`：
+
+- 拖动前 `textH=145.23 / todoH=103.76 / splitter=9`，三者之和 `257.99` = 容器 `258`：
+  比例口径与 flex-basis 的分母一致，**没有 9px 累积误差**
+- 上拖 80px：`todoRatio 0.4167 → 0.7108`，`textH` 停在 `72.01`（= `MIN_TEXT_PX` 生效）
+- 下拖 160px（越过中点）：`textH=161 / todoH=88`，`todoH` 停在 `88`（= `MIN_TODO_PX` 生效）
+- 双击：`aria-valuenow` 变 `null`、待办 `maxHeight` 回到 `44%`、textarea `flex` 回到 `1 1 0%`
+  ——自适应布局完整回来，`splitRatio=0` 落盘
+- 3 次 `ArrowUp`：`0.3534 → 0.3934`，与 `KEY_STEP=0.02` 的 3 步相符
+- 窗口高度 500 → 260：比例保持，`todoH` 被 CSS `clamp()` 兜在 `88`，
+  没有出现"待办区被压成 30px 看不见"
+- 真实鼠标（`mouse_event` 驱动，窗口 480×520 物理）：在分割线上按下上拖，
+  `store.json` 里 `splitRatio` 落成 `0.4167`，与 CDP 量的 DOM 高度一致

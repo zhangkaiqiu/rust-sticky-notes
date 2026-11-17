@@ -60,6 +60,42 @@
   background-color: rgb(var(--note-border) / calc(var(--note-alpha, 0.97) * 0.11));
 }
 
+/* ---------------------------------------------------------------- 正文 / 待办分割线
+ *
+ * 高度必须与 `split.ts` 的 `SPLITTER_HEIGHT_PX` 一致（9px）：手动分区时两个区域的
+ * flex-basis 是从 `calc((100% - 9px) * ratio)` 算出来的，这里多 1px 就会挤变形。
+ *
+ * 视觉上仍是"一条 1px 的线"（和改造前一样），但那 1px 只是热区宽度的 1/9——
+ * 用户想抓的就是这条线，太细会抓不住，所以热区上下各放 4px 透明留白。
+ */
+.note-splitter {
+  height: 9px;
+  cursor: row-resize;
+  /* 触屏 / 触控板：让浏览器别把拖动当成滚动 */
+  touch-action: none;
+  /* 拖动时会被指针捕获，禁止原生的文本拖放（否则松手会变成"把选中的字拖走"） */
+  user-select: none;
+}
+
+.note-splitter-line {
+  height: 1px;
+  background-color: rgb(var(--note-border) / calc(var(--note-alpha, 0.97) * 0.11));
+  transition:
+    background-color 140ms ease-out,
+    box-shadow 140ms ease-out;
+}
+
+/* hover / 拖动 / 键盘聚焦：变粗一点、染上强调色，明确"这里能抓" */
+.note-splitter:hover .note-splitter-line,
+.note-splitter[data-dragging="true"] .note-splitter-line {
+  background-color: rgb(var(--note-accent) / 0.75);
+  box-shadow: 0 0 0 1px rgb(var(--note-accent) / 0.28);
+}
+
+.note-splitter:focus-visible .note-splitter-line {
+  background-color: rgb(var(--note-accent) / 0.85);
+}
+
 .note-text {
   color: rgb(var(--note-text));
 }

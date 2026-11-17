@@ -10,6 +10,11 @@ type Props = {
   onEdit: (id: string, next: string) => void;
   onRemove: (id: string) => void;
   onClearDone: () => void;
+  /**
+   * 手动分区时的 flex-basis（见 `split.ts` 的 `todoBasis`）；
+   * `null` = 用户没调过分割线，走"按内容撑开、最多 44%"的自适应布局。
+   */
+  splitBasis: string | null;
 };
 
 export default function TodoList({
@@ -19,6 +24,7 @@ export default function TodoList({
   onEdit,
   onRemove,
   onClearDone,
+  splitBasis,
 }: Props) {
   const [draft, setDraft] = useState("");
   const doneCount = todos.reduce((n, t) => (t.done ? n + 1 : n), 0);
@@ -31,7 +37,14 @@ export default function TodoList({
   };
 
   return (
-    <section className="flex max-h-[44%] shrink-0 flex-col pt-1.5">
+    <section
+      style={splitBasis ? { flexBasis: splitBasis } : undefined}
+      className={`flex min-h-0 flex-col pt-1.5 ${
+        // 两种布局互斥：手动时两边都是固定 basis（不许被内容撑大）；
+        // 自适应时待办按内容撑开、最多占 44%
+        splitBasis ? "shrink-0 overflow-hidden" : "max-h-[44%] shrink-0"
+      }`}
+    >
       <header className="flex shrink-0 items-center justify-between px-3.5 pb-1">
         <span className="note-label text-[0.625em] font-semibold uppercase tracking-[0.14em]">
           待办

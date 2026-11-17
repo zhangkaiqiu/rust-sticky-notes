@@ -122,6 +122,14 @@ pub fn normalize_title(raw: &str) -> String {
     }
 }
 
+/// 分割比例的合法区间（待办区占比）。
+///
+/// 这里只兜底"JSON 被手改坏了"：真正的上下限在**前端按像素**算
+/// （正文 ≥ 72px / 待办 ≥ 88px），因为同一个比例在 260px 和 840px 高的便签里
+/// 对应的像素高度完全不同——后端不知道窗口多高，不该假装知道。
+pub const MIN_SPLIT_RATIO: f64 = 0.02;
+pub const MAX_SPLIT_RATIO: f64 = 0.98;
+
 /// 单张便签：标题 / 内容 / 外观 / 置顶 / 可见性 / 几何全部独立
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -138,6 +146,10 @@ pub struct Note {
     /// 折叠成条：窗口只留标题栏高度（约 48 逻辑像素）。
     /// 注意 `bounds` 始终保存**展开态**几何，折叠只改窗口实际尺寸，不把 48px 写进 bounds。
     pub collapsed: bool,
+    /// 正文区 / 待办区的分割比例 = 待办区高度 ÷ 正文区总高度（0–1）。
+    /// `0` 表示"用户没调过"，前端按内容自适应（待办区最多占 44%）。
+    /// 存比例而不是像素：窗口被拉大拉小时两个区域一起缩放。
+    pub split_ratio: f64,
     /// 启动时只恢复 visible = true 的便签；关闭 / 隐藏会置为 false
     pub visible: bool,
     pub bounds: Option<WindowGeometry>,
@@ -156,6 +168,7 @@ impl Default for Note {
             opacity: 0.97,
             pinned: false,
             collapsed: false,
+            split_ratio: 0.0,
             visible: true,
             bounds: None,
         }
@@ -185,6 +198,12 @@ impl Note {
         self.apply_style(&style);
         if !self.opacity.is_finite() {
             self.opacity = 0.97;
+        }
+        // 0 = 没调过（保持自适应）；其余值必须落在可用区间内
+        if !self.split_ratio.is_finite() || self.split_ratio <= 0.0 {
+            self.split_ratio = 0.0;
+        } else {
+            self.split_ratio = self.split_ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
         }
     }
 }
@@ -323,6 +342,7 @@ fn migrate(legacy: LegacyStore) -> Store {
         opacity: style.opacity,
         pinned: legacy.settings.always_on_top,
         collapsed: false,
+        split_ratio: 0.0,
         visible: true,
         bounds: legacy.window,
     };

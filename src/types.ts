@@ -28,6 +28,11 @@ export type Note = {
   pinned: boolean;
   /** 折叠成条：只显示标题栏；bounds 始终是展开态几何 */
   collapsed: boolean;
+  /**
+   * 正文区 / 待办区的分割比例（待办区占比，0–1）。
+   * `0` 是哨兵：表示用户没调过，走"按内容自适应"的默认布局。
+   */
+  splitRatio: number;
   visible: boolean;
   bounds: WindowGeometry | null;
 };
