@@ -74,10 +74,13 @@ npm run tauri build -- --no-bundle
 产物：
 
 - 可执行文件：`src-tauri/target/release/rust-sticky-notes.exe`
-- 安装包（去掉 `--no-bundle` 时）：`src-tauri/target/release/bundle/nsis/Rust_Sticky_Notes_0.5.1_x64-setup.exe`
+- 安装包（去掉 `--no-bundle` 时）：`src-tauri/target/release/bundle/nsis/Rust_Sticky_Notes_<version>_x64-setup.exe`
 
 **必须走 Tauri CLI**：直接 `cargo build --release` 不会带上 `custom-protocol` 特性，
-打出来的 exe 会去连 `localhost:1420`，显示"无法访问此页面"。
+打出来的 exe 会去连 `localhost:1420`，显示"无法访问此页面"（见 [diagnostics.md](diagnostics.md) 最后一节）。
+
+**打包前必须退出正在运行的实例**：便签常驻托盘，exe 被运行时 `tauri build` 会报
+`failed to remove ... .exe: 拒绝访问 (os error 5)`。从托盘"退出应用"后再打包。
 
 NSIS 安装模式为 `currentUser`（不需要管理员权限）。
 

@@ -133,3 +133,64 @@ ScreenRuler 会**长期霸占前台窗口**，导致 `ForceForeground(便签)` �
 
 出错排查时建议同时打开这个日志和 `--dump`：日志看**时序**（位是在哪一步被清掉的），
 dump 看**当前状态**（z、owner、rect）。
+
+## 交付前自检清单（踩过坑才写进来的）
+
+### 1. 验收用的 exe 必须由 `npm run tauri build` 产出
+
+```powershell
+npm run tauri build              # ← 正确：打开 custom-protocol，内嵌 dist/
+cargo build --release            # ← 错误：产物是 dev 版二进制
+```
+
+两者都是 `release` profile、产物都叫 `rust-sticky-notes.exe`、都「能启动」，
+区别只在 Cargo feature `custom-protocol`——它决定前端资源是**内嵌进 exe** 还是
+**去拉 `devUrl`（`http://localhost:1420`）**。
+
+直接用 `cargo build --release` 的产物启动，便签窗口里显示的是浏览器的：
+
+> 嗯… 无法访问此页面
+> **localhost** 拒绝连接。
+
+这**不是程序 bug**，是构建方式错了。判断特征：窗口能开、尺寸正常、托盘图标也在，
+但内容区是 Edge/WebView2 的报错页而不是便签。
+
+`cargo check` / `cargo build --release` 只用来验证"代码能编译"，**不能用来验收 UI**。
+
+### 2. 打包前必须先退出正在运行的实例
+
+便签常驻托盘，进程活着时 exe 被锁定，`tauri build` 在覆盖产物那一步失败：
+
+```
+error: failed to remove `...\target\release\rust-sticky-notes.exe`
+Caused by: 拒绝访问。 (os error 5)
+```
+
+从托盘「退出应用」再打包。脚本里可以这样收尾：
+
+```powershell
+Get-Process rust-sticky-notes -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 2   # 等文件句柄真正释放，立刻打包仍可能 race
+```
+
+### 3. 截图里的"透明底透出的字"不是便签数据
+
+便签卡片默认 97% 不透明度，`--note-alpha` 低时后面窗口/桌面会透出来。
+判断便签里到底有没有内容，看 `store.json` 的 `text` / `todos`，**不要看截图下结论**：
+
+```powershell
+$j = Get-Content "$env:APPDATA\com.ruststicky.notes\store.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+$j.notes | ForEach-Object { "title=$($_.title)  text.len=$($_.text.Length)  todos=$($_.todos.Count)" }
+```
+
+### 4. 无边框窗口的截图方法
+
+`MainWindowHandle` 常常指到 26×26 的辅助窗口，别拿它截图。按进程枚举顶层窗口，
+挑 `T` 类（Tauri Window）里尺寸最大的那个，再 `GetWindowRect` + `CopyFromScreen`：
+
+```powershell
+# 枚举 → 过滤 pid → 取 class='T' 且面积最大 → GetWindowRect → CopyFromScreen
+```
+
+截完记得删临时图片，别在 `profiles\desktop` 堆积。
+

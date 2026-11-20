@@ -410,3 +410,13 @@ let area = work_area_at(monitors, x, y).unwrap_or((0, 0, 1920, 1080));
 - release 实测（真实鼠标 `mouse_event` 在「添加待办」输入框右键）：
   弹出「剪切 / 复制 / 粘贴 / 全选 · ─── · 新建便签」，无选区时剪切 / 复制置灰，
   分隔线位置正确、顶部无悬空横线
+
+### 顺带记录：验收时踩的两个构建坑
+
+写进 [diagnostics.md](diagnostics.md) 的「交付前自检清单」：
+
+1. **用 `cargo build --release` 的产物验收 → 窗口里是"localhost 拒绝连接"**。
+   它不带 `custom-protocol` 特性，是 dev 版二进制，会去拉 `devUrl` 而不是内嵌的 `dist/`。
+   验收一律 `npm run tauri build`；`cargo check` 只证明"能编译"，不能用来验收 UI。
+2. **实例没退出就打包 → `failed to remove ...exe: 拒绝访问 (os error 5)`**。
+   便签常驻托盘会锁住 exe，先从托盘点「退出应用」。
