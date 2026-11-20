@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "./api";
@@ -38,11 +37,16 @@ export default function App() {
   const [style, setStyle] = useState<NoteStyle>(() => normalizeStyle(null));
   /** 设置面板是独立窗口，这里只记它开没开（由后端事件同步，不自己猜） */
   const [settingsOpen, setSettingsOpen] = useState(false);
-  /** 自定义右键菜单：坐标 + 触发位置（输入框 / 标题 / 卡片空白） */
+  /**
+   * 自定义右键菜单：坐标 + 触发位置。
+   * - `field`：命中了输入框（正文 / 待办文字 / 添加待办），带文字编辑项；
+   * - `card`：卡片空白处，只有便签级操作。
+   * 没有 `title` 分支：标题栏整体是「不弹菜单」区（见 TopBar 的 data-no-menu）。
+   */
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
-    target: "field" | "title" | "card";
+    target: "field" | "card";
   } | null>(null);
   /** 当前右键命中的输入元素，以及右键瞬间的选区（菜单点击会让输入框失焦） */
   const fieldRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
@@ -339,23 +343,55 @@ export default function App() {
 
   // ------------------------------------------------ 自定义右键菜单
 
-  const openFieldMenu = useCallback((event: ReactMouseEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const el = event.currentTarget as HTMLInputElement | HTMLTextAreaElement;
-    el.focus();
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? start;
-    fieldRef.current = el;
-    selectionRef.current = { start, end };
-    setMenu({ x: event.clientX, y: event.clientY, target: "field" });
-  }, []);
+  /**
+   * 右键只有**一条**规则，不再每个组件各写一遍 handler。
+   *
+   * 用 document 捕获阶段监听：命中输入框 → 编辑菜单（剪切/复制/粘贴/全选），
+   * 其余位置 → 卡片菜单。这样正文、待办文字框、添加待办框共用同一套逻辑，
+   * 以后再加输入框也不会漏（之前待办区就是因为各自手写 handler 才漏掉的）。
+   *
+   * `data-no-menu` 是例外标记，表示「这里不弹自定义菜单」：
+   * - 标题栏：折叠态只有 40px 高，菜单必然被裁，且标题没有可操作项；
+   * - 分割线：唯一动作是拖；
+   * - 菜单自身：避免在菜单上再叠一层。
+   * `data-menu-dismiss`（菜单的全屏遮罩）语义不同：右键只关闭，不在原地重开。
+   * 无论哪种情况，WebView2 的原生菜单都一律 preventDefault 掉。
+   */
+  const rootRef = useRef<HTMLDivElement>(null);
 
-  const openCardMenu = useCallback((event: ReactMouseEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    setMenu({ x: event.clientX, y: event.clientY, target: "card" });
-  }, []);
+  useEffect(() => {
+    const onContext = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target || !rootRef.current?.contains(target)) return;
+
+      event.preventDefault();
+      if (target.closest("[data-menu-dismiss]")) {
+        setMenu(null);
+        return;
+      }
+      if (collapsed || target.closest("[data-no-menu]")) return;
+
+      const field = target.closest<HTMLInputElement | HTMLTextAreaElement>(
+        "textarea, input"
+      );
+      if (field) {
+        // 记录右键瞬间的元素与选区：菜单点击会让输入框失焦
+        field.focus();
+        const start = field.selectionStart ?? field.value.length;
+        const end = field.selectionEnd ?? start;
+        fieldRef.current = field;
+        selectionRef.current = { start, end };
+        setMenu({ x: event.clientX, y: event.clientY, target: "field" });
+      } else {
+        fieldRef.current = null;
+        selectionRef.current = null;
+        setMenu({ x: event.clientX, y: event.clientY, target: "card" });
+      }
+    };
+
+    document.addEventListener("contextmenu", onContext);
+    return () => document.removeEventListener("contextmenu", onContext);
+  }, [collapsed]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -442,13 +478,14 @@ export default function App() {
     // 右键菜单只放**别处没有入口**的操作：
     // 折叠 / 设置 / 置顶 / 删除各自有专属按钮或设置面板，
     // 这里再列一遍就是重复入口，只留新建便签。
-    const common: ContextMenuItem[] = [
-      { kind: "separator", id: "sep-actions" },
-      { id: "new-note", label: "新建便签", onSelect: createNote },
-    ];
+    const newNote: ContextMenuItem = {
+      id: "new-note",
+      label: "新建便签",
+      onSelect: createNote,
+    };
 
-    // 标题右键直接进改名，不弹菜单，所以这里不会有 title 分支
-    if (menu.target === "card") return common;
+    // 卡片空白处：只有便签级操作。单条时不要再顶一条分隔线（那会像"菜单坏了"）
+    if (menu.target === "card") return [newNote];
 
     return [
       {
@@ -472,7 +509,8 @@ export default function App() {
         onSelect: () => void pasteAtSelection(),
       },
       { id: "select-all", label: "全选", shortcut: "Ctrl+A", onSelect: selectAllInField },
-      ...common,
+      { kind: "separator", id: "sep-actions" },
+      newNote,
     ];
   }, [
     menu,
@@ -490,10 +528,9 @@ export default function App() {
 
   return (
     <div
+      ref={rootRef}
       className="note-root relative h-full w-full"
       style={vars}
-      // 兜底：别让 WebView2 的原生右键菜单冒出来（卡片 / 输入框各自有自己的处理）
-      onContextMenu={(e) => e.preventDefault()}
     >
       {/*
         图钉 / 设置按钮故意放在卡片**外面**：它们绝对定位、不参与卡片内的 flex，
@@ -547,7 +584,6 @@ export default function App() {
         className={`note-card relative flex h-full w-full flex-col overflow-hidden rounded-[18px] border ${
           lowOpacity ? "note-card-edge" : ""
         }`}
-        onContextMenu={collapsed ? undefined : openCardMenu}
       >
         <TopBar
           title={title}
@@ -572,7 +608,6 @@ export default function App() {
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                onContextMenu={openFieldMenu}
                 spellCheck={false}
                 placeholder="写点什么…"
                 style={

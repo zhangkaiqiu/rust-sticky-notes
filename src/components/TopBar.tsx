@@ -53,11 +53,9 @@ export default function TopBar({
     <div
       data-tauri-drag-region
       style={{ height: BAR_HEIGHT }}
-      // 整条标题栏都不弹右键菜单（理由见下面标题处的注释）
-      onContextMenu={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-      }}
+      // 整条标题栏都不弹自定义菜单（data-no-menu 由 App 的右键规则识别）。
+      // 折叠态只有 40px 高，菜单必然被窗口裁掉；展开态也只和标题有关、没有可操作项。
+      data-no-menu
       // 两态用同一套 class：没有任何 collapsed 分支，几何就不可能漂移
       className="flex shrink-0 select-none items-center gap-1 pl-1 pr-[4.5rem]"
     >
@@ -81,19 +79,11 @@ export default function TopBar({
       </button>
 
       {/*
-        标题：**纯展示 + 拖动**，不响应右键，也不让右键冒泡到卡片。
-        标题栏整条都不弹菜单：折叠态只有 40px 高，菜单必然被窗口裁掉，
-        展开态弹出来也只有"新建便签"这种和标题无关的项，纯属噪音。
-        右键菜单统一由正文 / 卡片空白区提供（见 App 的 openCardMenu）。
+        标题：**纯展示 + 拖动**，不响应右键（标题栏整条已是 data-no-menu 区）。
         也不加 title 属性：原生 tooltip 又慢又丑，还把标题重复显示一遍。
       */}
       <span
         data-tauri-drag-region
-        onContextMenu={(e) => {
-          // preventDefault 挡住 WebView2 原生菜单，stopPropagation 挡住卡片的自定义菜单
-          e.preventDefault();
-          e.stopPropagation();
-        }}
         className="note-title-label min-w-0 flex-1 truncate text-[0.625em] font-semibold uppercase tracking-[0.14em]"
       >
         {title}

@@ -378,3 +378,35 @@ let area = work_area_at(monitors, x, y).unwrap_or((0, 0, 1920, 1080));
   没有出现"待办区被压成 30px 看不见"
 - 真实鼠标（`mouse_event` 驱动，窗口 480×520 物理）：在分割线上按下上拖，
   `store.json` 里 `splitRatio` 落成 `0.4167`，与 CDP 量的 DOM 高度一致
+
+## 0.5.2 修复待办区右键菜单不对（2026-11-20）
+
+用户反馈：「待办区域右键菜单有点奇怪」。
+
+**根因**：右键处理散在四个组件里，待办区的两个 `input`（待办文字 / 添加待办）**没有 handler**，
+事件冒泡到卡片 → 拿到的是卡片菜单。而卡片菜单的定义是「分隔线 + 新建便签」，所以表现为
+**只有一条「新建便签」、顶上还悬着一条分隔线**；同时根节点无条件 `preventDefault` 掉了原生菜单，
+**待办里根本没法右键粘贴**。
+
+**改法（不是补一处 handler，是把规则收敛成一个）**：
+
+- 删掉 `openFieldMenu` / `openCardMenu` 以及正文 textarea、卡片、TopBar 两处、Splitter 上的
+  5 处 `onContextMenu`；改由 `App.tsx` 一个 document 级 `contextmenu` 监听判定：
+  命中 `textarea, input` → 编辑菜单，否则 → 卡片菜单。`TodoList.tsx` 零改动即自动生效；
+- 「不弹菜单」的区域改成 `data-no-menu` 标记：标题栏整条、分割线、菜单自身；
+  菜单的全屏遮罩用 `data-menu-dismiss`：右键它只关闭、不在原地重开；
+- 删掉 `menu.target` 里永远产生不出来的 `"title"` 分支；
+- 卡片菜单不再以分隔线开头（单条菜单顶着横线像渲染坏了）；
+- `ContextMenu` 量完尺寸后把 `maxHeight` 夹进窗口并自身滚动——窗口最小 240×260，
+  菜单比窗口高时以前会被窗口边界直接切掉。
+
+规则固化在 [ui-conventions.md](ui-conventions.md) 第 9 条。
+
+### 验证
+
+- `npm run build`（tsc --noEmit + vite build）通过
+- 改动均为前端，Rust 侧未动（`cargo check` 结论不变）
+- `npm run tauri build` 打包通过（`Rust Sticky Notes_0.5.2_x64-setup.exe`）
+- release 实测（真实鼠标 `mouse_event` 在「添加待办」输入框右键）：
+  弹出「剪切 / 复制 / 粘贴 / 全选 · ─── · 新建便签」，无选区时剪切 / 复制置灰，
+  分隔线位置正确、顶部无悬空横线

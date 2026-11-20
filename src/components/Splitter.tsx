@@ -159,11 +159,8 @@ export default function Splitter({ ratio, bodyRef, onChange, onCommit }: Props) 
         onChange(0);
         onCommit(0);
       }}
-      onContextMenu={(event) => {
-        // 右键不弹菜单：这条线的唯一动作就是拖
-        event.preventDefault();
-        event.stopPropagation();
-      }}
+      // 右键不弹菜单：这条线的唯一动作就是拖（例外标记见 App 的右键规则）
+      data-no-menu
       className="note-splitter note-focus mx-3 flex shrink-0 items-center outline-none"
     >
       <span className="note-splitter-line w-full" />

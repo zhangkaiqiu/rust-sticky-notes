@@ -41,6 +41,9 @@ export default function ContextMenu({ x, y, items, onClose }: Props) {
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // 便签最小可缩到 240x260，菜单比窗口高时必须自己滚动，否则会被窗口边界裁掉
+    const maxHeight = window.innerHeight - EDGE * 2;
+    el.style.maxHeight = `${maxHeight}px`;
     const { width, height } = el.getBoundingClientRect();
     const maxX = window.innerWidth - width - EDGE;
     const maxY = window.innerHeight - height - EDGE;
@@ -75,21 +78,16 @@ export default function ContextMenu({ x, y, items, onClose }: Props) {
 
   return (
     <>
-      {/* 点击 / 右键菜单外的任何地方都关闭 */}
-      <div
-        className="fixed inset-0 z-30"
-        onMouseDown={onClose}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          onClose();
-        }}
-      />
+      {/* 点击菜单外的任何地方都关闭；右键点这里只关闭，不在原地重开（见 App 的右键规则） */}
+      <div className="fixed inset-0 z-30" data-menu-dismiss onMouseDown={onClose} />
 
       <div
         ref={ref}
         role="menu"
+        // 菜单自身不弹菜单，也不让原生菜单盖上来
+        data-no-menu
         style={{ left: pos.x, top: pos.y }}
-        className="note-panel fixed z-40 min-w-[9.75em] select-none rounded-[10px] border p-1 shadow-[0_14px_30px_-10px_rgba(40,28,0,0.55)]"
+        className="note-panel fixed z-40 min-w-[9.75em] select-none overflow-y-auto rounded-[10px] border p-1 shadow-[0_14px_30px_-10px_rgba(40,28,0,0.55)]"
       >
         {items.map((item) =>
           item.kind === "separator" ? (
